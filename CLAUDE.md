@@ -1,5 +1,7 @@
 # Steadywin GIM6010-8 무대 공연용 마일라 필름 스윙 제어
 
+**GitHub**: https://github.com/strongestweapon/SteadywinGim6010-8
+
 ## 하드웨어 / 펌웨어 상태 (2026-05-12 기준)
 
 - **모터**: SteadyWin GIM6010-8 (24V, 출력축 인코더 포함, 8:1 기어비, 14 pole-pair, 5N·m peak)
@@ -104,6 +106,18 @@
 - TRAP_TRAJ 모드가 사인 streaming 보다 매끄럽지만, 끝점에서 vel=0 정지 후 가속 → 방향 전환 충격.
 - 무부하에서 두드러짐. **진자 부하로 자연 해소 가능성 큼** — 운용 환경 검증 필요.
 - P29-30 튜닝 (vel_gain 0.10→0.145, pos_gain 20→50) 후 사용자 평가 "훨씬 부드러움".
+- **모드별 부드러움 차이 (2026-05-12 발견)**: VEL_RAMP 가 POS_FILTER 보다 압도적으로 부드러움. POS+ff 도 `pos_gain=5` 이하로 낮추면 VEL 근사. 자세한 분석은 아래 "사인 swing 모드별 부드러움 순위" 섹션 참고.
+
+### Anti-cogging cal 시도 결과 (2026-05-12)
+- ODrive 0.6.5 의 `start_anticogging_calibration()` 시도. 초기에는 모터가 +157 turn 위치에 있어서 cal 의 절대 0~1 turn setpoint 추적으로 31s 슬루 필요 → 진행 안 됨.
+- 모터를 0 으로 먼저 이동 후 cal 재시도 → 시간당 ~6 indices 진행 (50분 ETA, 일반적인 5-6분 대비 매우 느림). 부분 cal 후 사용자 중단.
+- ODrive 개발자 본인이 "current version of anticogging calibration kinda sucks" 라고 공언한 기능. **유성기어 모터에서는 BLDC cogging 만 보상 가능 (기어 cogging 못 잡음) → 효과 제한적.**
+- 결론: **anti-cog 우회. VEL_RAMP 모드 사용 + 진자 부하의 자연 댐핑으로 cogging 마스킹** 이 더 실용적.
+
+### 저속 cogging 인식의 본질 (2026-05-12 검증)
+- 1방향 회전 (`rotate_one_way.py`) 으로 검증: 저속 (0.5 turn/s) 거침, 고속 (7 turn/s) 부드러움. 즉 cogging 자체 문제 아닌 **속도-가시성** 문제.
+- 사인 swing 은 endpoint 에서 vel→0 거치므로 cogging 항상 노출됨.
+- 진자 inertia + 댐핑이 노출 시간을 평활할 것 — 부하 시 자연 개선 기대.
 
 ## 모드 선택 가이드
 
