@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+.venv/
+venv/
+env/
+
+.vscode/
+.idea/
+*.code-workspace
+
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 사용자별 캘리브레이션 결과
+calibration_*.json
+zero_offset.json
+
+# 보드 dump (시리얼 포함)
+tree*.txt
+
+# 메이커 매뉴얼 (저작권)
+manual.txt
+*.pdf
+
+# Claude Code 세션
+.claude/
+
+# Background task 출력
+tasks/
+*.output

@@ -1,0 +1,3 @@
+odrive==0.6.5.post2
+python-can[gs-usb]
+numpy
