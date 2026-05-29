@@ -296,6 +296,44 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - 앱: `.venv` 에 PySide6/pyqtgraph 설치됨. `python controller_app/main.py`
 - Wi-Fi: `esp32t2can/src/wifi_config.h` (SSID/PW, **gitignore**). 부팅 시 IP 시리얼 출력 + 상태줄에 상시 표시. 앱 IP 필드에 입력.
 
+## 다음 세션 계획: 웨이브테이블 오실레이터 (2026-05-31 바로 시작)
+
+**목표**: ESP32 로컬 오실레이터를 단일 사인 → **웨이브테이블 신스**로 확장. 재미난 파형 몇 개 + 파라미터,
+파형 간 튐 없이 전환. DAW/앱은 "어느 파형 + 모프 + 파라미터 + freq/amp" 만 전송.
+
+### 왜 이 방향인가 (어제 정립한 결론)
+- **웨이브테이블을 ESP32 에 저장 → 샘플 스트리밍 불필요 → 무지연 + 손실 견고** + 임의 파형 표현력.
+  ("데이터 스트리밍 vs 파라미터" 갈림길의 정답. 샘플을 버퍼링하면 지연 발생하지만, 파형을 ESP32 가
+  자기 클럭으로 생성하면 모션 지연 0. LFO 는 주기적이라 이걸로 충분.)
+- 멘탈 모델: **"모터 = 느리고(≤4Hz) 한계 있는 DC 무선 스피커."**
+
+### 구현 단계
+1. **웨이브테이블 뱅크**: N개 파형 (256 or 1024 샘플/주기 `float[]`). 시작 세트 = SINE, TRIANGLE, +α
+   (사용자가 "재미난" 모양 — 비대칭 swing, 더블범프, exp 감쇠 등 — 정할 것). 각 파형 shape_param 몇 개.
+2. **위상 누산기(이미 있음)** 로 테이블 보간 읽기: `value = lerp(tbl[i], tbl[i+1])`.
+   `pos = center + amp·value(phase)`, `vel_ff = amp·2πf·deriv(phase)` (미분테이블 미리계산 or 수치미분).
+3. **파형 전환 2모드**:
+   - **모프(크로스페이드)**: `out = (1-m)·A + m·B`, m 0→1 ~0.2~0.5s 램프. 어떤 모양이든 **위치·속도 연속(C1)**.
+   - **즉시 전환**: ⚠️ **모터는 끝점(turnaround, vel=0, pos=±amp)에서 교체** — 중심(0점)은 vel 최대라
+     거기서 바꾸면 저크. (오디오의 "zero-cross 스위치" 의 모터판 = 끝점). 또는 그냥 모프로 안전하게.
+4. **기존 재사용**: freq/amp LPF, 진폭 클램프(vel_limit, 4Hz상한), 자유진행, 통신두절 IDLE,
+   fault_stop(Clear_Errors), arm 시퀀스(VEL→center→POS soft gain), **200Hz** 송신.
+
+### 프로토콜 확장 (controller_app/protocol.py + ESP32 파서)
+현재 20바이트 `{magic,seq,run,waveform,freq,amp_deg,phase}` → `waveform_id` 실사용 + `morph(f32)` +
+`shape_param(f32)` 추가. 앱에 파형 선택 + 모프 슬라이더 추가.
+
+### 시작점 (현재 코드)
+- `esp32t2can/src/main.cpp`: 60Hz 루프의 `sinf(g_phase)` 한 줄을 **테이블 lookup + 모프**로 교체.
+  나머지(Wi-Fi UDP, arm, 클램프, 안전, 200Hz)는 그대로.
+- `controller_app/main.py`: freq/강도 슬라이더에 **waveform 콤보 + morph 슬라이더** 추가.
+
+### 그 이후
+- **OSC 수신 전환** (TouchDesigner `OSC Out CHOP`/Max → ESP32 OSC 라이브러리). 무선·DAW연동 기성품화.
+- 데이터 기반(진짜 비주기 임의신호) 필요 시 **지터버퍼 + 리미터** (슬로우 스피커 보호단).
+- 듀얼 모터(ESP-NOW broadcast) + **Ableton Link** 박자동기(ESP32 포팅 존재).
+- DAW 오디오 경로: BlackHole(mac)/VB-Cable(win) 또는 VBAN(audio-over-UDP).
+
 ## 다음 작업 (TODO)
 
 - [x] ~~무부하 무대 동작 시 잔존 진동 잡기~~ — 2026-05-12 P29-30 절차로 vel_gain=0.145, pos_gain=50 영구 저장 완료.
