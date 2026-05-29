@@ -245,6 +245,57 @@ USB 200Hz 환경에서 검증된 부드러움을 CAN/무선 환경 (60Hz) 으로
 - `python probe_sec_enc.py` — 2차 인코더 확인
 - `python probe_reboot_stability.py` — TOGGLE_TURN 측정
 
+## CAN / ESP32 무선 LFO 제어 — 실제 구현 (2026-05-30)
+
+USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무선 스트리밍** 구현 완료.
+코드: `esp32t2can/` (ESP32 펌웨어, PlatformIO) + `controller_app/` (데스크탑 앱, PySide6).
+
+### 하드웨어 (T-2CAN)
+- **T-2Can V1.0** = ESP32-S3-WROOM-1U + **MCP2515** (Classic CAN 2.0, SPI). ※ FD 변형(MCP2518FD)도 있으니 칩 각인 확인.
+- 크리스탈 **16MHz**, CAN **500kbps**, ODrive **node_id=1** (probe_can.py 실측).
+- 핀: SPI SCLK12/MOSI11/MISO13, MCP CS10 / INT8 / **RST9**.
+- CAN 드라이버 = **autowp/arduino-mcp2515** (LilyGo 예제와 동일, ESP32-S3 호환).
+
+### 핵심 교훈 / 함정 (반드시 기억)
+1. **MCP2515 RST 핀(9) 펄스 필수** — `SPI.begin` 전에 HIGH→LOW→HIGH 안 하면 칩이 리셋에 묶여 SPI 무응답.
+2. **sandeepmistry/arduino-CAN 은 ESP32-S3 빌드 실패** (구형 DPORT 레지스터). autowp 사용.
+3. **ODrive 0.6.5 는 CAN SDO(RxSdo) 미지원** (0.6.6+ 추가) → CAN 으로 `vel_ramp_rate` 설정 불가, idle 에서 raw 엔코더 읽기 불가. (vel_limit/current_limit/pos_gain 은 전용 메시지로 가능: Set_Limits 0x0F, Set_Pos_Gain 0x1A)
+4. **`Get_Encoder_Estimates`(0x09) 는 IDLE 에서 0** (컨트롤러 소스라 CLOSED_LOOP 에서만 라이브). 손으로 돌려도 idle pos=0 이 정상.
+5. **🚨 0.6.5 MISSING_INPUT(err=0x40) 버그**: PASSTHROUGH 에서 입력이 잠깐 끊기면 **축이 최대 음(-)속도로 폭주** → disarm (0.6.7 에서 수정). 2Hz 직접 setpoint 스트리밍 때 발생. **→ 로컬 오실레이터 구조로 근본 해결** (아래).
+
+### 제어 방식 (POS + velocity feedforward)
+- `swing_sine_pos.py` 방식을 CAN 으로: **`Set_Input_Pos`(0x0C) 에 위치 + Vel_FF** 한 프레임. drift 없음.
+- arm 시퀀스: VEL_RAMP(vel0)로 arm → 라이브 pos 를 **center 캡처**(idle CAN pos=0 우회) → `Set_Pos_Gain(5)` soft → POS/PASSTHROUGH 전환 → center hold (점프0). **이 순서가 시작 덜커덕/오버커런트 방지의 핵심.**
+- **center = arm 시점 실제 위치** → 손/중력으로 둔 위치가 자동으로 swing 중심 (실배포: 진자 중력 정지위치).
+- **ESP32→ODrive 송신율 = 200Hz** (무선율과 무관). 60Hz 면 큰 진폭에서 위치 계단 거침 → 200Hz 로 매끈.
+
+### 정지/안전 철학 (실측으로 정립)
+- **추종오차(손으로 잡음/무게 뒤처짐)는 에러 아님** → 모터는 계속 추종(버팀), 놓으면 따라잡음. ESP32 가 자체 위치/추종 한계로 disarm 안 함.
+- **진짜 정지 = ODrive 가 과전류 등으로 스스로 disarm**(state≠CLOSED_LOOP 또는 axis_error≠0) 일 때만 → fault_stop(IDLE + `Clear_Errors` 0x18).
+- 재시작: 앱 run=1 (또는 로컬 BOOT). Clear_Errors 가 latch 풀어줘서 깔끔히 재arm.
+- 18V Milwaukee 배터리(전류 여유 충분) 사용 예정 → 75W SMPS 벤치 과전류 걱정은 벤치 한정.
+
+### 무선 아키텍처 (Wi-Fi UDP, 파라미터 스트리밍)
+**핵심 원칙: 파형(setpoint)을 던지지 말고 파라미터를 던진다.**
+- 앱이 60Hz 로 `{run, freq, amp_deg, phase, seq}` (20바이트 LE, `controller_app/protocol.py`) 를 UDP 송신.
+- ESP32 가 **로컬 위상 오실레이터**를 freq/amp 로 돌림 (LPF 추종) → ODrive 200Hz 구동. 
+  **패킷 끊겨도 로컬에서 사인 계속 생성 → 입력 갭 0 → MISSING_INPUT 폭주 없음.**
+- **무수신 COMM_TIMEOUT(0.5s) → fade-out + IDLE** (통신 두절 안전).
+- **위상 lock 은 제거함** — Wi-Fi 지터(age 7~34ms)로 위상 끌어당기면 튐/엇박 발생. 단일 모터는 위상 임의값이라 불필요. (듀얼 모터 위상동기는 저속 공유기준으로 별도 구현 예정, 매 패킷 yank 금지.)
+- **주파수-진폭 coupling**: 앱 슬라이더 = "강도(%)", 실제 진폭 = 강도 × vel_limit 허용 최대 = `35.8/f`(출력°). 1Hz→±30°, 2Hz→±17.9°, 4Hz→±9°. 주파수 올리면 진폭 자동 축소. **4Hz 상한**. ESP32 도 출력 시점 재클램프(안전).
+
+### 멘탈 모델 (방향성)
+**"모터 = 아주 느리고(≤4Hz) 한계 있는 DC 무선 스피커."**
+- 현재(파라미터 기반): 지연0, 손실에 무한 강함, 단 파라메트릭 파형(sin/tri/saw)만.
+- 다음(데이터 기반, 미구현): 임의 파형(DAW/Ableton) 라이브 스트리밍을 위해 **샘플 스트림 + 지터버퍼(~30~50ms) + 물리 리미터(amp/vel/accel/대역) + 언더런 시 파라메트릭 자유진행 fallback**. = "오디오 스피커" 원리를 UDP 에 구현. (Bluetooth A2DP 는 S3 미지원, AES67 은 과중이라 기성 무선오디오 ❌.)
+- DAW 연결: BlackHole(mac)/VB-Cable(win) 가상 오디오 → Python 브리지 → UDP, 또는 ESP32-S3 를 USB Audio Class 장치로(유선).
+
+### 빌드/플래시/모니터 (PlatformIO)
+- 빌드+업로드: `platformio run -d esp32t2can -t upload --upload-port COM5` (penv: `C:\Users\songh\.platformio\penv\Scripts\platformio.exe`)
+- 시리얼 모니터: `esp32t2can/tools/read_serial.py COM5 <초>` (**penv 파이썬으로** — pyserial 있음. .venv 엔 없음)
+- 앱: `.venv` 에 PySide6/pyqtgraph 설치됨. `python controller_app/main.py`
+- Wi-Fi: `esp32t2can/src/wifi_config.h` (SSID/PW, **gitignore**). 부팅 시 IP 시리얼 출력 + 상태줄에 상시 표시. 앱 IP 필드에 입력.
+
 ## 다음 작업 (TODO)
 
 - [x] ~~무부하 무대 동작 시 잔존 진동 잡기~~ — 2026-05-12 P29-30 절차로 vel_gain=0.145, pos_gain=50 영구 저장 완료.
@@ -253,6 +304,13 @@ USB 200Hz 환경에서 검증된 부드러움을 CAN/무선 환경 (60Hz) 으로
 - [ ] `apply_tuning.py` 작성 — 다른 모터에 같은 게인 일괄 적용용
 - [ ] CAN 이행 시 `watchdog_timeout = 0.1` 설정 + `save_configuration` (현재 0 = 비활성)
 - [ ] `odrivetool backup-config` 로 공장 캘리브 + 튜닝 설정 백업
+- [x] ~~CAN(T-2CAN) 제어~~ — 2026-05-30 완료 (POS+ff, 200Hz, autowp/mcp2515)
+- [x] ~~Wi-Fi UDP 무선 LFO 스트리밍~~ — 2026-05-30 완료 (파라미터 기반 + 로컬 오실레이터 + 통신두절 IDLE)
+- [x] ~~데스크탑 컨트롤러 앱~~ — 2026-05-30 controller_app (PySide6+pyqtgraph, freq/amp 슬라이더, 파형 비주얼)
+- [ ] **데이터 기반 "슬로우 스피커"**: 샘플 스트림 + 지터버퍼 + 물리 리미터 + 파라메트릭 fallback (임의 파형/DAW용)
+- [ ] DAW(Ableton) 연결: 가상 오디오(BlackHole/VB-Cable) → 브리지 → UDP
+- [ ] 듀얼 모터: 2번째 ODrive node_id=2, ESP-NOW broadcast + 저속 위상동기
+- [ ] CAN 배포 전 ODrive 에 `watchdog_timeout=0.1` save (ESP32 죽으면 모터 disarm 2중 안전)
 
 ### 듀얼 모터 셋업 체크리스트 (5m × 1.2m 마일라 batten)
 

@@ -1,0 +1,10 @@
+# PlatformIO 빌드 산출물
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/
+
+# Wi-Fi 자격증명 (커밋 금지)
+src/wifi_config.h
