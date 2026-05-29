@@ -67,6 +67,9 @@ def main() -> int:
                          "1Hz × 0.667turn → 26 필요. 기본 100 (안전 마진).")
     ap.add_argument("--passthrough", action="store_true",
                     help="POS+VEL feedforward (PASSTHROUGH) 모드로 — 위치도 명령")
+    ap.add_argument("--vel-gain", type=float, default=None,
+                    help="vel_gain 을 RAM 에만 임시 설정 (영구 저장 X). "
+                         "미지정 시 보드 현재값 사용. 1번 모터 P29 튜닝값=0.145.")
     args = ap.parse_args()
 
     if args.amp <= 0 or args.freq <= 0 or args.duration <= 0:
@@ -97,6 +100,12 @@ def main() -> int:
     try:
         ensure_calibrated(axis)
         apply_safety(axis, args.current_lim, args.vel_limit)
+
+        # vel_gain RAM 임시 설정 (영구 저장 안 함 — 비교/시연용)
+        if args.vel_gain is not None:
+            old_vg = float(axis.controller.config.vel_gain)
+            axis.controller.config.vel_gain = float(args.vel_gain)
+            print(f"vel_gain: {old_vg:.4f} → {args.vel_gain:.4f} (RAM only, 영구 저장 안 함)")
 
         if args.passthrough:
             # POS_PASSTHROUGH 위치제어 + velocity feedforward
