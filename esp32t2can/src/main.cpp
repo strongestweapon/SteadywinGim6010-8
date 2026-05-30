@@ -22,6 +22,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "wifi_config.h"
+#include "wavetables.h"   // SIN/SWING 위치·속도 테이블 (gen_wavetables.py 생성)
 
 /* ---- 핀맵 (MCP2515 변형) ---- */
 static const uint8_t PIN_SPI_SCLK=12, PIN_SPI_MOSI=11, PIN_SPI_MISO=13;
@@ -40,6 +41,7 @@ static const float    FREQ_MAX       = 4.0f;     // Hz 상한
 static const uint16_t UPDATE_HZ      = 200;      // ESP32→ODrive Set_Input_Pos 송신율 (무선율과 무관)
                                                  // 60→200: 위치 스텝 1/3.3 → 큰 진폭에서도 매끈. CAN 버스 ~7%.
 static const float    RAMP_S         = 1.0f;     // 진폭 fade in/out [s]
+static const float    MORPH_S        = 0.30f;    // 파형 전환 크로스페이드 [s] (C1 연속)
 static const float    LOCK_GAIN      = 0.15f;    // 위상 soft-lock 게인 (0~1)
 static const float    PARAM_LPF      = 0.08f;    // freq/amp 추종 LPF
 static const uint32_t COMM_TIMEOUT_MS = 500;     // 무수신 → IDLE [ms]
@@ -60,6 +62,9 @@ static const uint8_t CMD_SET_POS_GAIN=0x1A, CMD_CLEAR_ERRORS=0x18;
 static const uint32_t AXIS_IDLE=1, AXIS_CLOSED_LOOP=8;
 static const uint32_t CTRL_VELOCITY=2, CTRL_POSITION=3;
 static const uint32_t INPUT_PASSTHROUGH=1, INPUT_VEL_RAMP=2;
+
+/* ---- 파형 enum (protocol.py 와 동일) ---- */
+static const uint8_t WAVE_SINE=0, WAVE_SWING=1;
 
 static const float TWO_PI_F = 6.28318530718f;
 
@@ -82,6 +87,8 @@ float g_center = 0;
 float g_phase = 0;            // 로컬 위상 [rad]
 float g_freq = 0,  g_freq_t = 0;    // 현재/목표 주파수 [Hz]
 float g_amp = 0,   g_amp_t = 0;     // 현재/목표 진폭 [모터 turn] (클램프 후)
+uint8_t g_waveform = WAVE_SINE;     // 목표 파형 (수신값)
+float   g_morph = 0;                // 현재 블렌드 0=SINE..1=SWING (MORPH_S 로 램프)
 uint8_t g_run = 0;            // 마지막 수신 run
 uint16_t g_seq = 0, g_pkt_cnt = 0;
 uint32_t g_last_pkt_ms = 0;
@@ -92,13 +99,26 @@ bool g_have_pkt = false;
 static inline uint8_t id_node(uint32_t id){ return (id>>5)&0x3F; }
 static inline uint8_t id_cmd(uint32_t id){ return id&0x1F; }
 static inline float wrapPi(float a){ while(a>M_PI)a-=TWO_PI_F; while(a<-M_PI)a+=TWO_PI_F; return a; }
+static inline float lerpf(float a, float b, float m){ return a + (b-a)*m; }
 
-/* ---- 출력° → 모터 turn, 진폭 안전 클램프 ---- */
+/* ---- 웨이브테이블 lookup (선형보간, 위상 [0,2π)) ---- */
+float wt_lookup(const float* tbl, float phase){
+  float x = phase / TWO_PI_F * (float)WT_N;
+  int i = (int)floorf(x);
+  float frac = x - (float)i;
+  i %= WT_N; if(i<0) i += WT_N;
+  int j = (i+1) % WT_N;
+  return tbl[i] + (tbl[j]-tbl[i])*frac;
+}
+
+/* ---- 출력° → 모터 turn, 진폭 안전 클램프 ----
+ * peak_vel/peak_acc: 파형의 peak 속도·가속 배수(사인=1.0). 그네는 중심 통과가
+ * 빨라 1보다 큼 → 그만큼 진폭을 더 깎아야 vel_limit/accel 안 넘음(MISSING_INPUT 폭주 방지). */
 float deg_to_turn(float deg){ return deg/360.0f*GEAR; }
-float clamp_amp(float amp_turn, float freq){
+float clamp_amp(float amp_turn, float freq, float peak_vel, float peak_acc){
   if (freq > 0.01f){
-    float v_max = VEL_LIM / (TWO_PI_F*freq);                 // 속도 한계
-    float a_max = ALPHA_MAX / (TWO_PI_F*TWO_PI_F*freq*freq); // 가속 한계
+    float v_max = VEL_LIM   / (TWO_PI_F*freq*peak_vel);                 // 속도 한계
+    float a_max = ALPHA_MAX / (TWO_PI_F*TWO_PI_F*freq*freq*peak_acc);   // 가속 한계
     float m = (v_max < a_max) ? v_max : a_max;
     if (amp_turn > m) amp_turn = m;
   }
@@ -201,8 +221,12 @@ void pollUdp(){
           memcpy(&phase,&udpbuf[16],4);
           // 안전 클램프
           if(freq<0) freq=0; if(freq>FREQ_MAX) freq=FREQ_MAX;
+          g_waveform = (wave==WAVE_SWING) ? WAVE_SWING : WAVE_SINE;
+          // 목표 진폭은 목표 파형의 peak 계수로 클램프 (출력 시점에 블렌드값으로 재클램프)
+          float pv = (g_waveform==WAVE_SWING)?WT_PEAKVEL_SWING:WT_PEAKVEL_SINE;
+          float pa = (g_waveform==WAVE_SWING)?WT_PEAKACC_SWING:WT_PEAKACC_SINE;
           g_freq_t = freq;
-          g_amp_t  = clamp_amp(deg_to_turn(amp_deg), freq);
+          g_amp_t  = clamp_amp(deg_to_turn(amp_deg), freq, pv, pa);
           g_run = run; g_seq = seq; g_pkt_cnt++;
           g_last_pkt_ms = millis();
           g_have_pkt = true;
@@ -289,6 +313,11 @@ void loop(){
     // 파라미터 부드럽게 추종
     g_freq += (g_freq_t - g_freq)*PARAM_LPF;
     g_amp  += (g_amp_t  - g_amp )*PARAM_LPF;
+    // 파형 크로스페이드 (선택 변경 시 MORPH_S 동안 SINE↔SWING 블렌드 → 튐 없음)
+    float morph_t = (g_waveform==WAVE_SWING) ? 1.0f : 0.0f;
+    float dm = dt / MORPH_S;
+    if(g_morph < morph_t){ g_morph += dm; if(g_morph>morph_t) g_morph=morph_t; }
+    else if(g_morph > morph_t){ g_morph -= dm; if(g_morph<morph_t) g_morph=morph_t; }
     // 위상 진행 (패킷 없어도 계속 = 자유진행)
     g_phase += TWO_PI_F*g_freq*dt;
     if(g_phase> M_PI*2) g_phase-=TWO_PI_F;
@@ -303,9 +332,15 @@ void loop(){
       if(env<=0.0f){ env=0.0f; tx_input_pos(g_center,0.0f); tx_axis_state(AXIS_IDLE); g_mode=M_IDLE; Serial.println(">>> IDLE"); }
     }
     if(g_mode!=M_IDLE){
-      float amp = clamp_amp(g_amp, g_freq);     // 출력 시점 재클램프(안전)
-      float pos = g_center + env*amp*sinf(g_phase);
-      float vff = env*amp*(TWO_PI_F*g_freq)*cosf(g_phase);
+      // 블렌드된 peak 계수로 재클램프 (그네일수록 진폭 더 깎임 = 안전)
+      float pv = lerpf(WT_PEAKVEL_SINE, WT_PEAKVEL_SWING, g_morph);
+      float pa = lerpf(WT_PEAKACC_SINE, WT_PEAKACC_SWING, g_morph);
+      float amp = clamp_amp(g_amp, g_freq, pv, pa);
+      // 위치/속도 = 두 테이블 lookup 의 morph 블렌드 (C1 연속)
+      float val  = lerpf(wt_lookup(WT_POS_SINE,g_phase), wt_lookup(WT_POS_SWING,g_phase), g_morph);
+      float dval = lerpf(wt_lookup(WT_VEL_SINE,g_phase), wt_lookup(WT_VEL_SWING,g_phase), g_morph);
+      float pos = g_center + env*amp*val;
+      float vff = env*amp*(TWO_PI_F*g_freq)*dval;
       tx_input_pos(pos, vff);
     }
   }
@@ -321,6 +356,8 @@ void loop(){
     Serial.print(" ["); Serial.print(m); Serial.print("] ");
     Serial.print("f="); Serial.print(g_freq,2);
     Serial.print(" amp="); Serial.print(g_amp,3);
+    Serial.print(" wav="); Serial.print(g_waveform==WAVE_SWING?"swing":"sine");
+    Serial.print(" morph="); Serial.print(g_morph,2);
     Serial.print(" run="); Serial.print(g_run);
     Serial.print(" pkt="); Serial.print(g_pkt_cnt);
     Serial.print(" age="); Serial.print(age); Serial.print("ms");

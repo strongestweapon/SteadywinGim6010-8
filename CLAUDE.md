@@ -296,37 +296,52 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - 앱: `.venv` 에 PySide6/pyqtgraph 설치됨. `python controller_app/main.py`
 - Wi-Fi: `esp32t2can/src/wifi_config.h` (SSID/PW, **gitignore**). 부팅 시 IP 시리얼 출력 + 상태줄에 상시 표시. 앱 IP 필드에 입력.
 
-## 다음 세션 계획: 웨이브테이블 오실레이터 (2026-05-31 바로 시작)
+## 웨이브테이블 오실레이터 — 사인 + 그네 2파형 구현 완료 (2026-05-30)
 
-**목표**: ESP32 로컬 오실레이터를 단일 사인 → **웨이브테이블 신스**로 확장. 재미난 파형 몇 개 + 파라미터,
-파형 간 튐 없이 전환. DAW/앱은 "어느 파형 + 모프 + 파라미터 + freq/amp" 만 전송.
+⚠️ **코드·컴파일 전부 완료. 보드 플래시는 아직 안 함** (내일 할 일 참고).
 
-### 왜 이 방향인가 (어제 정립한 결론)
-- **웨이브테이블을 ESP32 에 저장 → 샘플 스트리밍 불필요 → 무지연 + 손실 견고** + 임의 파형 표현력.
-  ("데이터 스트리밍 vs 파라미터" 갈림길의 정답. 샘플을 버퍼링하면 지연 발생하지만, 파형을 ESP32 가
-  자기 클럭으로 생성하면 모션 지연 0. LFO 는 주기적이라 이걸로 충분.)
-- 멘탈 모델: **"모터 = 느리고(≤4Hz) 한계 있는 DC 무선 스피커."**
+### 무엇을 했나
+- ESP32 로컬 오실레이터의 `sinf(g_phase)` → **웨이브테이블 lookup + 모프(크로스페이드)** 로 교체.
+- **2파형**: `사인`(ripple/진동용) + `그네`(swing/진자). 패킷 변경 없이 기존 `waveform` 바이트 재활용.
+- **파형 전환 = 자동 크로스페이드(morph 0.3s)** — 사인↔그네 고르면 ESP32 가 두 테이블 블렌드, C1 연속(튐 없음). 사용자 morph 슬라이더는 다음 단계.
 
-### 구현 단계
-1. **웨이브테이블 뱅크**: N개 파형 (256 or 1024 샘플/주기 `float[]`). 시작 세트 = SINE, TRIANGLE, +α
-   (사용자가 "재미난" 모양 — 비대칭 swing, 더블범프, exp 감쇠 등 — 정할 것). 각 파형 shape_param 몇 개.
-2. **위상 누산기(이미 있음)** 로 테이블 보간 읽기: `value = lerp(tbl[i], tbl[i+1])`.
-   `pos = center + amp·value(phase)`, `vel_ff = amp·2πf·deriv(phase)` (미분테이블 미리계산 or 수치미분).
-3. **파형 전환 2모드**:
-   - **모프(크로스페이드)**: `out = (1-m)·A + m·B`, m 0→1 ~0.2~0.5s 램프. 어떤 모양이든 **위치·속도 연속(C1)**.
-   - **즉시 전환**: ⚠️ **모터는 끝점(turnaround, vel=0, pos=±amp)에서 교체** — 중심(0점)은 vel 최대라
-     거기서 바꾸면 저크. (오디오의 "zero-cross 스위치" 의 모터판 = 끝점). 또는 그냥 모프로 안전하게.
-4. **기존 재사용**: freq/amp LPF, 진폭 클램프(vel_limit, 4Hz상한), 자유진행, 통신두절 IDLE,
-   fault_stop(Clear_Errors), arm 시퀀스(VEL→center→POS soft gain), **200Hz** 송신.
+### "그네 파형" 정의 (오늘 확정한 핵심)
+- 큰 진폭 **진자 운동방정식** `θ̈=-sin(θ), θ(0)=θ₀, θ̇(0)=0` 의 해를 θ₀ 로 정규화한 것.
+  θ₀→0=사인, θ₀ 클수록 **정점에서 머물고 중심을 빠르게 휙**(그네 느낌). shape_param=θ₀.
+- **그네 느낌은 위치보다 속도 프로파일에 있다**: 위치 차이는 미묘하고, 중심통과 peak 속도가 사인보다 큼.
+- 현재 테이블 **θ₀=150°** → peak 속도 **1.30×**, peak 가속 1.19×. (취향 바꾸려면 `gen_wavetables.py --theta0 168` 등으로 재생성. 단 진폭 derate↑)
+- ⚠️ **안전(필수)**: 그네는 peak 속도 큼 → 진폭 클램프를 peak_vel 배수만큼 더 깎아야 vel_limit 안 넘음(MISSING_INPUT 폭주 방지). `clamp_amp(amp, freq, peak_vel, peak_acc)` 로 구현, morph 블렌드값으로 출력 시점 재클램프.
 
-### 프로토콜 확장 (controller_app/protocol.py + ESP32 파서)
-현재 20바이트 `{magic,seq,run,waveform,freq,amp_deg,phase}` → `waveform_id` 실사용 + `morph(f32)` +
-`shape_param(f32)` 추가. 앱에 파형 선택 + 모프 슬라이더 추가.
+### 새/변경 파일
+- `waveforms.py` (신규, 레포 루트): 진자 테이블 정의(numpy, scipy 불필요). 앱 미리보기 + 헤더 생성 공유.
+- `gen_wavetables.py` (신규): `esp32t2can/src/wavetables.h` (C 배열 4개 + peak 계수) 생성. **보드 명령 아님**.
+- `esp32t2can/src/main.cpp`: `#include wavetables.h`, `wt_lookup()`, g_waveform/g_morph, clamp_amp derate, 출력부 lookup+morph.
+- `controller_app/protocol.py`: `WAVE_SWING=1`(기존 TRI/SAW 대체), `amp_deg_max(freq, peak_vel)` derate.
+- `controller_app/main.py`: **파형 콤보(사인/그네)** + 미리보기 morph + 주파수·파형 coupling.
+- 시각화(1회성): `wavetable_preview.py`, `wavetable_shipped.png` (사인 vs 그네 모양·속도 비교).
 
-### 시작점 (현재 코드)
-- `esp32t2can/src/main.cpp`: 60Hz 루프의 `sinf(g_phase)` 한 줄을 **테이블 lookup + 모프**로 교체.
-  나머지(Wi-Fi UDP, arm, 클램프, 안전, 200Hz)는 그대로.
-- `controller_app/main.py`: freq/강도 슬라이더에 **waveform 콤보 + morph 슬라이더** 추가.
+## IMU(BNO085) — 진단 모드 작성 + 아키텍처 결정 (2026-05-30)
+
+⚠️ **코드·컴파일 완료. 플래시 안 함. BNO085 실물 아직 미연결.** 상세는 메모리 `project_imu_plan` 참고.
+
+### 결정 (사용자 요구)
+- IMU = **Adafruit BNO085**, T-2CAN **QWIIC(STEMMA)=I2C** 연결. **SDA=GPIO1, SCL=GPIO2** (LilyGo 공식 핀맵 확인, 기존 SPI/MCP 핀과 무충돌), 주소 0x4A.
+- **IMU 없어도 그네 동작은 그대로** — IMU 는 오픈루프 오실레이터에 얹는 **선택 레이어**. 못 찾으면 `g_imu_ok=false` 로 기존 동작 유지.
+- **설치마다 위치 달라짐 → 부팅 자동 tare**: 모터 `g_center` 캡처와 같은 패턴. 정지 확정 시 현재 방향을 0점으로. (지자기 안 쓰고 Game Rotation Vector = 중력기준 tilt.)
+
+### `esp32t2can/src/imu_test.cpp` (신규, 별도 PlatformIO env `imu-test`)
+- 제어/모터 완전 분리(메인 `main.cpp` 안 건드림). `platformio.ini` 에 `build_src_filter` 로 env 별 소스 분리, `imu-test` 는 `adafruit/Adafruit BNO08x` 만.
+- 출력: 쿼터니언 / **rest 대비 tilt°** / gyro[xyz] / STILL / **▲APEX(정점)** 마커. 자동 tare + 수동 재-tare(시리얼 `t`/BOOT).
+- 빌드/플래시: `platformio run -d esp32t2can -e imu-test -t upload --upload-port COM5`
+
+## 내일 할 일 (리마인드 — 전부 보드 명령, 승인 필요)
+1. **그네 파형 무부하 검증**: `main.cpp` 플래시 → 앱(`python controller_app/main.py`) 으로 사인↔그네 전환·느낌 실측. (필요시 θ₀ 조정 후 `gen_wavetables.py` 재생성→재플래시.)
+2. **BNO085 진단**: 실물 QWIIC 연결 → `imu-test` 플래시 → tilt/gyro/APEX/자동tare 동작 확인. (안 되면 SDA1/SCL2·주소·배선부터.)
+3. 그 다음(선택): morph 슬라이더 + shape_param 프로토콜 확장 / IMU 를 제어 루프에 얹기(공진 펌핑·공진주파수 측정).
+
+### (이후) 프로토콜 확장 — 미구현
+현재 20바이트 `{magic,seq,run,waveform,freq,amp_deg,phase}`. 향후 `morph(f32)` + `shape_param(f32)` 추가 →
+앱에 morph 슬라이더 + θ₀ 슬라이더. (지금은 waveform 바이트만 실사용, morph 는 ESP32 자동 전환.)
 
 ### 그 이후
 - **OSC 수신 전환** (TouchDesigner `OSC Out CHOP`/Max → ESP32 OSC 라이브러리). 무선·DAW연동 기성품화.
@@ -345,6 +360,12 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - [x] ~~CAN(T-2CAN) 제어~~ — 2026-05-30 완료 (POS+ff, 200Hz, autowp/mcp2515)
 - [x] ~~Wi-Fi UDP 무선 LFO 스트리밍~~ — 2026-05-30 완료 (파라미터 기반 + 로컬 오실레이터 + 통신두절 IDLE)
 - [x] ~~데스크탑 컨트롤러 앱~~ — 2026-05-30 controller_app (PySide6+pyqtgraph, freq/amp 슬라이더, 파형 비주얼)
+- [x] ~~웨이브테이블: 사인+그네 2파형~~ — 2026-05-30 구현·컴파일 완료 (morph 크로스페이드, peak_vel derate). **플래시 미실행**
+- [x] ~~IMU 진단 모드 작성~~ — 2026-05-30 `imu_test.cpp` (별도 env, BNO085 QWIIC, tilt/gyro/APEX/자동tare). **플래시·실물연결 미실행**
+- [ ] **(내일) 그네 파형 무부하 플래시·검증** — main.cpp 플래시 + 앱 사인↔그네 전환 실측
+- [ ] **(내일) BNO085 실물 연결 + imu-test 플래시·검증** — tilt/APEX/자동tare 동작 확인
+- [ ] morph 슬라이더 + shape_param(θ₀) 프로토콜 확장 (앱 + ESP32 파서)
+- [ ] IMU 를 제어 루프에 얹기 — 공진 주파수 측정 / 정점 폐루프 공진 펌핑 (ESP32 직결만)
 - [ ] **데이터 기반 "슬로우 스피커"**: 샘플 스트림 + 지터버퍼 + 물리 리미터 + 파라메트릭 fallback (임의 파형/DAW용)
 - [ ] DAW(Ableton) 연결: 가상 오디오(BlackHole/VB-Cable) → 브리지 → UDP
 - [ ] 듀얼 모터: 2번째 ODrive node_id=2, ESP-NOW broadcast + 저속 위상동기

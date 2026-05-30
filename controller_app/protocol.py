@@ -33,23 +33,24 @@ PACKET_SIZE = struct.calcsize(PACKET_FMT)  # = 20
 FREQ_MAX = 4.0             # Hz — 이 모터 출력축 상한
 AMP_DEG_MAX = 30.0         # 출력축 ±deg (저주파에서. 고주파는 ESP32 가 vel_limit 으로 더 깎음)
 
-# waveform enum
+# waveform enum (ESP32 main.cpp 와 동일)
 WAVE_SINE = 0
-WAVE_TRI = 1
-WAVE_SAW = 2
+WAVE_SWING = 1   # 큰 진폭 진자(그네) — waveforms.py 참고
+# (2~ : 향후 웨이브테이블 추가 슬롯)
 
 # 모터/제어 상수 (ESP32 와 동일) — 진폭·주파수 coupling 계산용
 VEL_LIM_MOTOR = 5.0        # rev/s (ESP32 vel_limit)
 GEAR = 8.0                 # 출력→모터 기어비
 
 
-def amp_deg_max(freq: float) -> float:
+def amp_deg_max(freq: float, peak_vel: float = 1.0) -> float:
     """현재 주파수에서 vel_limit 이 허용하는 출력축 최대 진폭 [deg].
-    sinusoid peak 모터속도 = 2π·f·amp_turn ≤ VEL_LIM_MOTOR → amp_turn_max = VEL_LIM/(2πf).
+    peak 모터속도 = 2π·f·amp_turn·peak_vel ≤ VEL_LIM_MOTOR → amp_turn_max = VEL_LIM/(2πf·peak_vel).
+    peak_vel 은 파형별 중심통과 속도배수(사인=1.0, 그네>1) — ESP32 clamp_amp 와 동일 식.
     출력° = amp_turn/GEAR×360. 기구 상한 AMP_DEG_MAX 와 min."""
     if freq <= 0.01:
         return AMP_DEG_MAX
-    amp_turn_max = VEL_LIM_MOTOR / (2.0 * math.pi * freq)
+    amp_turn_max = VEL_LIM_MOTOR / (2.0 * math.pi * freq * peak_vel)
     amp_deg_v = amp_turn_max / GEAR * 360.0
     return min(AMP_DEG_MAX, amp_deg_v)
 

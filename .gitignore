@@ -23,6 +23,9 @@ zero_offset.json
 # 보드 dump (시리얼 포함)
 tree*.txt
 
+# 생성 산출물 (스크립트로 재생성: wavetable_preview.py / gen_wavetables.py)
+wavetable_*.png
+
 # 메이커 매뉴얼 (저작권)
 manual.txt
 *.pdf
