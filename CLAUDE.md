@@ -52,7 +52,7 @@
 | 모터 | 시리얼 | `phase_offset`(공장) | 공장 출하 게인 | 부드러움 (무부하 실측) | `index_offset` | `TOGGLE_TURN` | 영구저장 상태 |
 |---|---|---|---|---|---|---|---|
 | **1번** | `89340A6C3037` | 22076 | vel_gain 0.10 / vel_int 1.0 / curr_lim 60 | 0.145 가 0.10보다 부드러움 (튜닝 채택 0.145) | -2.142441 | 0.142469 | ✅ 게인/한계/0점 전부 `save_configuration` 완료 (pos=50, vel_gain=0.145, vel_limit=5, curr=10) |
-| **2번** | `C4610A6C3037` | 19916 | vel_gain 0.10 / vel_int 1.0 / curr_lim 60 | 0.10 이 부드럽고 **0.145 는 더 떨림 (1번과 반대)** | 0 (미설정) | 미측정 | ❌ 전부 공장 default. 튜닝/0점/저장 안 함 |
+| **2번** | `C4610A6C3037` | 19916 | vel_gain 0.10 / vel_int 1.0 / curr_lim 60 | 0.10 이 부드럽고 **0.145 는 더 떨림 (1번과 반대)** | 0 (미설정) | 미측정 | ⚠️ 게인/0점은 공장 default. **단 `can.node_id=2` + `can.config.enable_r120=False`(종단 OFF) 영구 저장됨 (2026-06-04, `set_node_id.py`/`set_can_term.py`)** — 듀얼 버스 가운데 노드용 |
 | **3번** | `7B600A6C3037` | 21012 | **vel_gain 0.05 / vel_int 0.20 / curr_lim 45** | **현재까지 가장 부드러움 (공장 0.05 그대로)** | 0 (미설정) | 미측정 | ❌ 전부 공장 default. 튜닝/0점/저장 안 함 |
 | **4번** | `7A360A6C3037` | 13017 | **vel_gain 0.05 / vel_int 0.20 / curr_lim 45** (3번과 동일) | 3번보다 **조금 더 떨림** (같은 게인인데도) | 0 (미설정) | 미측정 | ❌ 전부 공장 default. 튜닝/0점/저장 안 함 |
 | **5번** | `8F350A6C3037` | 10439 | **vel_gain 0.05 / vel_int 0.20 / curr_lim 45** (3번과 동일) | **3번과 비슷하게 부드러움** (3·5번이 베스트) | 0 (미설정) | 미측정 | ❌ 전부 공장 default. 튜닝/0점/저장 안 함 |
@@ -227,6 +227,8 @@ USB 200Hz 환경에서 검증된 부드러움을 CAN/무선 환경 (60Hz) 으로
 
 ## 스크립트 사용 흐름
 
+⚠️ **odrive 모듈은 시스템 `python`(Python310)이 아니라 `.venv` 에 있음** → ODrive 스크립트는 반드시 `.venv\Scripts\python.exe <script>.py` 로 실행. (그냥 `python` 쓰면 `ModuleNotFoundError: odrive`.)
+
 1. `python test_connect.py` — 연결 + 보드 상태 확인
 2. `python read_encoders.py --hz 50` — 인코더 실시간 모니터
 3. `python set_zero.py` — user zero 영구 저장 (사용자 명시 시에만)
@@ -255,12 +257,21 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - 크리스탈 **16MHz**, CAN **500kbps**, ODrive **node_id=1** (probe_can.py 실측).
 - 핀: SPI SCLK12/MOSI11/MISO13, MCP CS10 / INT8 / **RST9**.
 - CAN 드라이버 = **autowp/arduino-mcp2515** (LilyGo 예제와 동일, ESP32-S3 호환).
+- **CAN 채널 2개·둘 다 절연 (스키매틱 `T-2Can_V1.0.pdf` 확정, 레포 `project/`):**
+  - **CAN-A** = MCP2515(SPI) → 절연 트랜시버 U2 `TD501MCAN`. **펌웨어가 쓰는 채널.**
+  - **CAN-B** = ESP32 네이티브 TWAI → 절연 트랜시버 U1 `TD501MCAN`. 현재 미사용.
+  - 두 채널 **독립 버스 + 갈바닉 절연** (모터 전원 GND ↔ ESP32 분리). "포트 2개 = 같은 버스" 아님.
+  - **종단 120Ω 양 채널 다 내장·고정** (RZ2=CAN-A, RZ1=CAN-B, 솔더 고정 — 점퍼 아님). → **T2CAN 은 항상 버스 끝에 두기.** 데이지체인 시 반대쪽 ODrive 만 종단 ON, 중간 ODrive OFF.
+- **듀얼 모터 배선 (검증된 권장)**: 두 ODrive 를 CAN-A 한 버스에 묶고 (데이지체인 또는 T2CAN 중심 스타), node_id 1/2 구분. 로컬 오실레이터 1개가 두 setpoint 생성 → 위상 100% 동기 (ESP-NOW 시계동기 불필요). 절연 필요 시에만 CAN-B 분리(네이티브 TWAI 드라이버 추가 작업 필요).
+- **ODrive 종단 120Ω = USB 소프트 제어** (매뉴얼 P47): `can.config.r120_gpio_num=5` + `can.config.enable_r120=True/False`. 물리 점퍼 아님. `set_can_term.py` 로 읽기/켜기/끄기 + save. 공장 default = `enable_r120=True`.
+- **종단 셋업 (실제 배선: T2CAN 중심 대칭 스타, 각 stub ~1m)**: T2CAN 120Ω 고정(못 끔, 중심) + ODrive 한쪽만 ON → **총 60Ω** 목표. 둘 다 ON 이면 40Ω(과부하), 둘 다 OFF 면 120Ω(부족). → **모터2 = OFF(2026-06-04 저장), 모터1 = ON 유지.** 1m stub 의 미종단 반사는 500kbps(비트 2µs) 대비 ~10ns 라 무시 가능. 검증: 전원 OFF 후 CAN_H↔L = 60Ω.
 
 ### 핵심 교훈 / 함정 (반드시 기억)
 1. **MCP2515 RST 핀(9) 펄스 필수** — `SPI.begin` 전에 HIGH→LOW→HIGH 안 하면 칩이 리셋에 묶여 SPI 무응답.
 2. **sandeepmistry/arduino-CAN 은 ESP32-S3 빌드 실패** (구형 DPORT 레지스터). autowp 사용.
 3. **ODrive 0.6.5 는 CAN SDO(RxSdo) 미지원** (0.6.6+ 추가) → CAN 으로 `vel_ramp_rate` 설정 불가, idle 에서 raw 엔코더 읽기 불가. (vel_limit/current_limit/pos_gain 은 전용 메시지로 가능: Set_Limits 0x0F, Set_Pos_Gain 0x1A)
 4. **`Get_Encoder_Estimates`(0x09) 는 IDLE 에서 0** (컨트롤러 소스라 CLOSED_LOOP 에서만 라이브). 손으로 돌려도 idle pos=0 이 정상.
+   - **단 `Get_Encoder_Count`(0x0A: shadow_count/count_in_cpr)는 IDLE(전류 0)에서도 라이브** (인코더 드라이버 소스). 2026-06-04 `enc_test.cpp` 로 실측 확인: arm 없이 RTR 요청 → 손 움직임 추적됨 (0x09 는 0 고정인데 0x0A 는 변함). `encoder_count_rate_ms` 기본 0 이라 **RTR(remote request)로 on-demand 요청**하면 config 변경 없이 응답. → **전류 없이 CAN 으로 위치 파악 가능.** `count_in_cpr/16384` = mono-turn 위치 (pos_estimate 의 정수turn+이걸로 구성, USB idle 실측에서 pos_estimate ≈ count_in_cpr/cpr 확인). shadow_count 는 raw 누적카운터라 turn 직환산 안 됨.
 5. **🚨 0.6.5 MISSING_INPUT(err=0x40) 버그**: PASSTHROUGH 에서 입력이 잠깐 끊기면 **축이 최대 음(-)속도로 폭주** → disarm (0.6.7 에서 수정). 2Hz 직접 setpoint 스트리밍 때 발생. **→ 로컬 오실레이터 구조로 근본 해결** (아래).
 
 ### 제어 방식 (POS + velocity feedforward)
@@ -274,6 +285,7 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - **진짜 정지 = ODrive 가 과전류 등으로 스스로 disarm**(state≠CLOSED_LOOP 또는 axis_error≠0) 일 때만 → fault_stop(IDLE + `Clear_Errors` 0x18).
 - 재시작: 앱 run=1 (또는 로컬 BOOT). Clear_Errors 가 latch 풀어줘서 깔끔히 재arm.
 - 18V Milwaukee 배터리(전류 여유 충분) 사용 예정 → 75W SMPS 벤치 과전류 걱정은 벤치 한정.
+- **⚠️ 실측(2026-06-04): 듀얼 모터 + 토크 펌핑 실테스트 중 75W 벤치 SMPS 의 폴리퓨즈(PTC) 트립** → 모터 전원 끊겨 CAN 하트비트 0 → 전부 먹통(사인·펌프 모두). 펌웨어 정상, 전원 한계 문제였음. PTC 라 식으면 자동복구. **교훈: 75W 로는 듀얼+토크 인러시/피크 부족.** 벤치 계속 쓰려면 current_lim↓(예 5~6A)/PUMP_T_MAX↓/순차 arm/단일 모터, 실테스트는 배터리. 전류예산 ≈ 75W/20V ≈ 3.7A 버스.
 
 ### 무선 아키텍처 (Wi-Fi UDP, 파라미터 스트리밍)
 **핵심 원칙: 파형(setpoint)을 던지지 말고 파라미터를 던진다.**
@@ -282,7 +294,7 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
   **패킷 끊겨도 로컬에서 사인 계속 생성 → 입력 갭 0 → MISSING_INPUT 폭주 없음.**
 - **무수신 COMM_TIMEOUT(0.5s) → fade-out + IDLE** (통신 두절 안전).
 - **위상 lock 은 제거함** — Wi-Fi 지터(age 7~34ms)로 위상 끌어당기면 튐/엇박 발생. 단일 모터는 위상 임의값이라 불필요. (듀얼 모터 위상동기는 저속 공유기준으로 별도 구현 예정, 매 패킷 yank 금지.)
-- **주파수-진폭 coupling**: 앱 슬라이더 = "강도(%)", 실제 진폭 = 강도 × vel_limit 허용 최대 = `35.8/f`(출력°). 1Hz→±30°, 2Hz→±17.9°, 4Hz→±9°. 주파수 올리면 진폭 자동 축소. **4Hz 상한**. ESP32 도 출력 시점 재클램프(안전).
+- **주파수-진폭 coupling (2026-06-04 갱신)**: 앱 슬라이더 = "강도(%)", 실제 진폭 = 강도 × `amp_deg_max(f)`. **단순 1/f(속도일정) 아님** — 앵커 두 점 `(1Hz,60°)–(5Hz,10°)` 통과하는 `A(f)=a/f+b`(a=62.5,b=−2.5, peak속도 단조감소=안전) 사용. **상한 `FREQ_MAX`=5Hz**. 사인 기준: 1Hz=±60°, 2Hz=±28.8°, 3Hz=±18.3°, 4Hz=±13.1°, 5Hz=±10°. 그네(peak_vel 1.3)는 진폭/1.3 추가 derate. 펌웨어값: `AMP_DEG_MAX`=60, `AMP_MAX_TURN`=1.34turn(=출력60°), `VEL_LIM`=9(안전 속도클램프, 1Hz·60°의 peak 8.4 안 깎게 — **앱 곡선이 실제 shaping, 펌웨어 clamp_amp 는 더 느슨한 vel/accel 안전천장**). ESP32 출력 시점 재클램프 유지.
 
 ### 멘탈 모델 (방향성)
 **"모터 = 아주 느리고(≤4Hz) 한계 있는 DC 무선 스피커."**
@@ -334,6 +346,62 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - 출력: 쿼터니언 / **rest 대비 tilt°** / gyro[xyz] / STILL / **▲APEX(정점)** 마커. 자동 tare + 수동 재-tare(시리얼 `t`/BOOT).
 - 빌드/플래시: `platformio run -d esp32t2can -e imu-test -t upload --upload-port COM5`
 
+## 듀얼 모터 펌웨어 — Phase 5 (2026-06-04)
+
+⚠️ **코드·컴파일 완료(빌드 SUCCESS). 보드 플래시·실배선 검증 안 함.**
+
+### 무엇을 했나
+- `main.cpp` 를 단일노드 → **2 ODrive(node_id 1,2) 동시 제어**로 리팩터. 한 CAN-A 버스, 오실레이터 1개로 두 모터 구동 → 위상 원천 동기 (ESP-NOW/시계동기 불필요).
+- `set_node_id.py` 로 모터2 = node_id 2 저장 완료. `set_can_term.py` 로 모터2 종단 OFF(60Ω) 저장 완료.
+
+### main.cpp 상단 조정 상수 (조립 후 한 줄로 바꿈)
+- `NODE_IDS[] = {1, 2}` — 두 모터 노드.
+- **극성 = 앱 런타임 제어** (2026-06-04): 더 이상 컴파일 상수 아님. 앱 체크박스 "모터1/모터2 반전" → 패킷 `flags`(offset6, bit0=m1, bit1=m2) → ESP32 `g_motor_sign[]`. 기본 = node2 체크(미러). **운전 중 토글하면 즉시 반전(슬램) 안 하고 `g_restart_pending` 으로 fade-out→새 극성 fade-in 자동 재시작** (amp≈0 시점에 부호 교체, 재arm 없이 매끈). 앱 STOP/통신두절/fault 는 재시작 취소하고 IDLE.
+- `MOTOR_REL_PHASE[] = {0, 0}` — **평행 swing(batten 수평 유지).** Z-twist(중심축 비틀기)는 `{0.0f, M_PI}` 로.
+
+### 구조 변경 핵심
+- `St st[2]`, `g_center[2]` 모터별. `sendCmd(node,…)`/`tx_*(node,…)` 노드 인자. `drainRx` 가 `motor_index(node)` 로 분배.
+- `arm_and_center()` 두 모터 동시 arm → 각자 center 캡처 → 각자 soft gain POS hold.
+- **fault = 어느 한쪽이라도 disarm(과전류/err) → `fault_stop` 가 양쪽 동시 IDLE** (batten 비대칭 응력 방지, CLAUDE 체크리스트 반영). 통신두절·BOOT 도 양쪽 정지.
+- CAN 부하: 200Hz × 2모터 = 400 frame/s ≈ 500kbps 의 ~15%, 여유.
+
+### 빌드/플래시
+- 빌드: `platformio run -d esp32t2can -e lilygo-t-2can` (env 명 = **`lilygo-t-2can`**, imu-test 아님)
+- 플래시: `… -e lilygo-t-2can -t upload --upload-port COM5`
+
+### 검증 순서 (다음, 전부 실배선 후)
+1. 두 모터 CAN-A 버스 연결(종단 60Ω 확인) + 플래시 → 앱 START.
+2. **부호 확인**: 두 모터가 같은 물리 방향인가? 반대면 `MOTOR_SIGN` 한쪽 -1, 재플래시.
+3. 한쪽 강제 disarm(손으로 막아 과전류) → 양쪽 같이 멈추는지.
+4. (선택) `MOTOR_REL_PHASE={0,M_PI}` 로 twist 모드 시험.
+
+## IMU 메인 통합 + 앱 2D 시각화 (2026-06-04)
+
+⚠️ **컴파일·플래시·앱 실행 완료. 실제 IMU 움직임 표시 검증은 사용자 확인 단계.**
+
+- **방침**: IMU 는 **센싱만**(제어엔 아직 안 씀). 방향(공진/펌핑) 미정이라 일단 "보기"만.
+- **main.cpp 에 BNO085 통합** (모터 제어와 공존): `imu_poll()` 매 loop, `Wire.begin(SDA1,SCL2)`, GameRotVec+Gyro, 정지 자동 tare, apex 감지. **IMU 없어도 모터 정상**(g_imu_ok=false 면 스킵). BOOT=비상정지 유지(IMU tare 와 분리), 시리얼 't'/앱 버튼으로 재-tare.
+- **텔레메트리 ESP32→앱** (신규): `TELEM_MAGIC=0x0DCB`, 38바이트 `{seq,status,tilt,pitch,roll,gx,gy,gz,m1pos,m2pos}`. 앱이 보낸 패킷 송신자 주소로 회신(`g_app_ip`), 30Hz. status 비트=imu_ok/rest_set/still/apex.
+- **앱(`controller_app`)**: `unpack_telem` + **2D 틸트(roll/pitch 진자) + tilt° 시간그래프 + 상태라벨 + "IMU 0점(tare)" 버튼**. 3D 불필요(그네=1축). tare 는 `flags` bit2 `REQ_TARE` one-shot(6틱) → ESP32 rising-edge.
+- **프로토콜 확장**: 명령패킷 offset6 `flags` = bit0 m1극성 / bit1 m2극성 / **bit2 REQ_TARE**. 극성변경 감지는 `&0x03` 마스크(tare 비트 무관).
+- 빌드 RAM 14.9%/Flash 22.6%. 검증: telem 왕복 OK, main.py 컴파일 OK.
+
+## 2026-06-04~05 세션 요약 (듀얼모터 + IMU통합 + 펌프/리프트드롭)
+
+**완료·검증:**
+- **듀얼모터**: 모터2 `node_id=2` + `enable_r120=False`(종단OFF) 영구저장 (`set_node_id.py`/`set_can_term.py`). T2CAN=2채널 절연버스(스키매틱 확인). `main.cpp` 듀얼노드 `{1,2}` 리팩터, **MOTOR_SIGN 미러보정**(node2=−1), fault 시 양쪽 동시정지.
+- **극성 토글**(앱 체크박스→flags, 운전중 변경 시 fade-restart), **per-motor 게인 CAN 적용**(Set_Limits 0x0F/Set_Vel_Gains 0x1B).
+- **CAN 0x0A(Get_Encoder_Count) idle 위치읽기 확인**(`enc_test.cpp`, RTR): **전류0으로 위치파악 가능** → teach&playback 토대.
+- **IMU(BNO085) 메인통합**: telemetry(38→54B) → 앱 2D틸트/tilt/자이로 플롯 + tare. **전류(Iq)/VBus/버스전류(Ibus) 모니터 + 피크홀드**(RTR 0x14/0x17).
+- **진폭곡선**: `FREQ_MAX=5`, 앵커 `(1Hz,60°)–(5Hz,10°)` a/f+b. **고유진동수 ≈0.4Hz 측정**(`measure_freeswing.py`).
+- **토크펌핑 모드**(`WAVE_PUMP`, 공통모드 anti-damping). **들어올림+낙하**(`WAVE_LIFTDROP`, 수동 좌/우 버튼 press-hold).
+
+**⚠️ 안전사고 + 교훈 (중요):**
+- **토크모드 프리폴(TORQUE/PASSTHROUGH torque 0)이 ODrive 0.6.5 MISSING_INPUT 버그로 폭주** → 360°+ 연속회전, 전선 끊길 뻔. **이 기구는 파이프가 자유롭게 돌아 토크모드 자체가 위험.** → **lift-drop은 위치제어 only + 프리폴은 IDLE(비여자, STOP과 동일)** 로만. ±90° 하드리미트(`fault_stop`).
+- **버그 수정**: 프리폴로 IDLE 끄면 "ODrive fault(state≠CLOSED_LOOP)" 안전체크가 오인 → arm/disarm 무한반복(터턱). `intentional_idle`(lift-drop+!g_ld_armed) 예외처리로 해결.
+
+**미완 (다음 세션):** lift-drop "안된다"(사용자) — 위치제어 buttons는 동작하나 프리폴 후 catch/스윙 느낌 미흡. 기구 특성(무거운 암 고관성 + 파이프 자유회전 + 토크모드 금지)이 근본 제약. **위치제어 기반으로만** 자연스러운 스윙 재설계 필요. (관련 메모리: [[project_teach_playback]])
+
 ## 내일 할 일 (리마인드 — 전부 보드 명령, 승인 필요)
 1. **그네 파형 무부하 검증**: `main.cpp` 플래시 → 앱(`python controller_app/main.py`) 으로 사인↔그네 전환·느낌 실측. (필요시 θ₀ 조정 후 `gen_wavetables.py` 재생성→재플래시.)
 2. **BNO085 진단**: 실물 QWIIC 연결 → `imu-test` 플래시 → tilt/gyro/APEX/자동tare 동작 확인. (안 되면 SDA1/SCL2·주소·배선부터.)
@@ -353,7 +421,7 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 
 - [x] ~~무부하 무대 동작 시 잔존 진동 잡기~~ — 2026-05-12 P29-30 절차로 vel_gain=0.145, pos_gain=50 영구 저장 완료.
 - [ ] 진자 부착 후 동작 검증 (잔존 진동 자연 해소 + 새 게인의 실제 효과)
-- [ ] 공진 주파수 측정 (자유 진동)
+- [x] ~~공진 주파수 측정 (자유 진동)~~ — 2026-06-04 `controller_app/measure_freeswing.py` 로 IMU telemetry 받아 측정. **고유 진동수 ≈ 0.4Hz (주기 2.5s)**. roll(부호각, std 4.3°)+tilt(크기)÷2 두 독립신호 일치. 봉+필름=중력진자 확인. ⚠️ tilt 는 크기라 중심통과마다 0→**실제의 2배 주파수**(부호있는 pitch/roll/gyro 로 봐야 진짜값). gx 1.33Hz 는 스윙 아닌 진동/구조모드 추정.
 - [ ] `apply_tuning.py` 작성 — 다른 모터에 같은 게인 일괄 적용용
 - [ ] CAN 이행 시 `watchdog_timeout = 0.1` 설정 + `save_configuration` (현재 0 = 비활성)
 - [ ] `odrivetool backup-config` 로 공장 캘리브 + 튜닝 설정 백업
@@ -363,12 +431,15 @@ USB 검증을 마치고 **LilyGo T-2CAN (ESP32-S3) 으로 CAN 제어 + Wi-Fi 무
 - [x] ~~웨이브테이블: 사인+그네 2파형~~ — 2026-05-30 구현·컴파일 완료 (morph 크로스페이드, peak_vel derate). **플래시 미실행**
 - [x] ~~IMU 진단 모드 작성~~ — 2026-05-30 `imu_test.cpp` (별도 env, BNO085 QWIIC, tilt/gyro/APEX/자동tare). **플래시·실물연결 미실행**
 - [ ] **(내일) 그네 파형 무부하 플래시·검증** — main.cpp 플래시 + 앱 사인↔그네 전환 실측
-- [ ] **(내일) BNO085 실물 연결 + imu-test 플래시·검증** — tilt/APEX/자동tare 동작 확인
+- [x] ~~BNO085 실물 연결 + imu-test 플래시·검증~~ — 2026-06-04 완료. I2C(SDA1/SCL2,0x4A) OK, tilt°(33→86°) 추종, gyro, 자동tare(rest=set) 정상. (APEX 는 주기 swing 시 표시)
+- [ ] **(A) idle 위치 모니터링 + "진자 정지 후 시작"** — main.cpp 에 0x0A RTR idle 읽기 추가. 앱에 전류0 현재각도 표시 + 0x0A 안정 시에만 arm. (center 캡처는 안전한 VEL-arm 유지)
+- [ ] **teach & playback (손 녹화→부드럽게 재생)** — 사용자 핵심 목표. 모터 무여자(전류0)로 손 backdrive → 0x0A 로 궤적 녹화 → POS 로 재생. 2026-06-04 0x0A idle-read 실측 확인으로 토대 마련. (A 위에 구현)
 - [ ] morph 슬라이더 + shape_param(θ₀) 프로토콜 확장 (앱 + ESP32 파서)
-- [ ] IMU 를 제어 루프에 얹기 — 공진 주파수 측정 / 정점 폐루프 공진 펌핑 (ESP32 직결만)
+- **(2026-06-04) 기구 발견: 모터-암(무거운 추) 사이 고관성/탄성** → 빠른 펌프 지터 토크론 암이 안 움직이고 파이프/탄성만 돎. **느린 위치/토크 구동은 암을 움직임.** → 펌프(anti-damping)는 이 기구에 비효율 → **`WAVE_LIFTDROP=3` "들어올림+낙하(래칫)" 모드 구현**: 토크 PD로 ±amp 까지 올림(올리는 절반만 모터 일함) → 토크0 프리폴(중력, 내리는 절반) → 홈 통과 시 반대편 올림 반복. 공통(강체)swing 각/속도 사용(미러보정). 파라미터 LD_KP=4,LD_KD=1,LD_T_MAX_BASE=0.8N·m(펌프세기 슬라이더로 스케일), 못 올리면 4s timeout→release(스톨 방지). 안전(펌프와 공유): IMU>80°/vel>6/angle>amp×1.5/err→정지. **무부하/실부하 미검증, 폴리퓨즈 주의(올릴 때 전류↑).**
+- [x] ~~공진 주파수 측정~~ 완료(≈0.4Hz). [ ] **토크 펌핑 모드 구현 완료(2026-06-04, 무부하/실부하 미검증)** — `WAVE_PUMP=2` 파형. 토크제어(PASSTHROUGH)로 arm. **공통(강체 swing) 속도 기반 펌핑**: `swing_vel = avg(g_motor_sign[i]·vel_i)`, `T_i = g_motor_sign[i]·clamp(pump_gain×swing_vel)`, 진폭한계 밖이면 `−K_brake`. **미러보정(g_motor_sign) 적용 필수** — 안 그러면 ① 사인모드와 좌표 불일치 ② twist(비틀림)모드까지 증폭됨. 공통모드 법칙이 강체 스윙만 펌핑하고 twist 무시(2026-06-04 수정). arm 시 apply_polarity latch. 속도/각도=엔코더 0x09(CL에서 라이브), IMU tilt=독립 안전한계. 안전: IMU>70°/|vel|>3/|angle|>한계×1.5/ODrive err→fault_stop. 펌프게인=앱 phase필드(0..1×0.3), 진폭한계=amp_deg. T_MAX=0.3N·m. 펌프↔파형 전환은 재arm 필요(정지 후 재START). **실검증 시 펌프세기 0부터 천천히, STOP 손.** 다음: 정점 위상 펌핑·공진 자동추종
 - [ ] **데이터 기반 "슬로우 스피커"**: 샘플 스트림 + 지터버퍼 + 물리 리미터 + 파라메트릭 fallback (임의 파형/DAW용)
 - [ ] DAW(Ableton) 연결: 가상 오디오(BlackHole/VB-Cable) → 브리지 → UDP
-- [ ] 듀얼 모터: 2번째 ODrive node_id=2, ESP-NOW broadcast + 저속 위상동기
+- [x] ~~듀얼 모터 node_id=2 + 종단 OFF + 펌웨어 듀얼노드 리팩터~~ — 2026-06-04 완료(컴파일). **플래시·실배선 미검증**. ESP-NOW 불필요(한 CAN-A 버스, 오실레이터 1개로 동기). 다음: 실배선 + MOTOR_SIGN 부호 확인
 - [ ] CAN 배포 전 ODrive 에 `watchdog_timeout=0.1` save (ESP32 죽으면 모터 disarm 2중 안전)
 
 ### 듀얼 모터 셋업 체크리스트 (5m × 1.2m 마일라 batten)
