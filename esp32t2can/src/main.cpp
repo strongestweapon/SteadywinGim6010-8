@@ -46,6 +46,9 @@ static const float    APEX_GYRO=0.10f, APEX_MIN_TILT=3.0f;
 static const uint16_t TELEM_HZ=30;        // ESP32→앱 IMU 텔레메트리 송신율
 static const float    RAD2DEG=57.2957795f;
 
+/* ---- 기능 토글 ---- */
+static const bool     USE_IMU = true;    // IMU(BNO085) 센싱/텔레메트리 표시용 (제어엔 안 씀). false 면 폴링 중단.
+
 /* ---- 듀얼 모터 구성 ----
  * NODE_IDS      : 한 CAN-A 버스의 두 ODrive node_id (set_node_id.py 로 1/2 저장).
  * MOTOR_SIGN    : +command 가 두 모터에서 같은 물리 방향이 되도록 하는 부호.
@@ -75,6 +78,15 @@ static const float    VEL_LIM        = 9.0f;     // rev/s 안전 vel 클램프 (
 static const float    ALPHA_MAX      = 308.0f;   // turn/s² (10A 기준 가속 한계, 진폭 클램프)
 static const float    AMP_MAX_TURN   = 1.34f;    // 모터 절대 진폭 상한 (=출력 ±60°, 1.333turn). 저주파에서 bind
 static const float    FREQ_MAX       = 5.0f;     // Hz 상한
+
+/* ---- 수동 스윙(키보드/조이스틱) + ±90° 하드리미트 ---- */
+static const float    HARD_LIMIT_TURN = 2.0f;    // center 기준 ±90° 출력 = 모터 ±2.0turn. 측정이 이걸 넘으면 폭주로 보고 정지
+static const float    MANUAL_POS_GAIN = 5.0f;    // 수동 위치게인. soft(=swing_sine_pos 의 부드러운 영역) → 저속 cogging 덜그럭 방지.
+                                                 //   슬루가 vel_ff 공급 → pos loop 는 트림만. 실부하서 처지면 8~15 로.
+static const float    MANUAL_SPEED_DEF  = 2.0f;  // 수동 슬루 속도 기본값 [모터 turn/s] (앱 슬라이더로 라이브 변경)
+static const float    MANUAL_SPEED_MAX  = 10.0f; // 수동 슬루 속도 상한 [turn/s]. 8+ 에서 가/감속 전류 스파이크로 과부하(disarm) → 10 이 실용 상한
+static const float    MANUAL_ACCEL_K    = 5.0f;  // 수동 가/감속 = 속도×이 비율 [turn/s²] — 낮출수록 전류 스파이크↓(과부하 방지), 단 sweep 살짝 느려짐
+static const float    MANUAL_VEL_LIMIT  = 12.0f; // 수동 모드 보드 vel_limit [turn/s] (10 명령+여유, RAM only)
 
 /* ---- 오실레이터 / 스트림 lock ---- */
 static const uint16_t UPDATE_HZ      = 200;      // ESP32→ODrive Set_Input_Pos 송신율 (무선율과 무관)
@@ -109,7 +121,7 @@ static const uint32_t CTRL_TORQUE=1, CTRL_VELOCITY=2, CTRL_POSITION=3;
 static const uint32_t INPUT_PASSTHROUGH=1, INPUT_VEL_RAMP=2, INPUT_TRAP_TRAJ=5;
 
 /* ---- 파형 enum (protocol.py 와 동일) ---- */
-static const uint8_t WAVE_SINE=0, WAVE_SWING=1, WAVE_PUMP=2, WAVE_LIFTDROP=3;
+static const uint8_t WAVE_SINE=0, WAVE_SWING=1, WAVE_PUMP=2, WAVE_LIFTDROP=3, WAVE_MANUAL=4;
 
 /* ---- 토크 펌핑 파라미터 (보수적 — 위험하니 작게 시작) ---- */
 static const float PUMP_KGAIN_MAX = 1.00f;  // 펌프게인 슬라이더 100% 시 [N·m/(turn/s)]
@@ -183,11 +195,18 @@ uint32_t g_ld_drive_t0 = 0;        // 드라이브 시작
 int8_t  g_ld_btn = 0;               // 현재 held 버튼: -1=좌(뒤) 0=없음 +1=우(앞)
 int8_t  g_ld_prev_btn = 0;
 bool    g_ld_armed = false;          // lift-drop arm 상태 (떼면 IDLE=비여자, 누르면 재arm)
+/* ---- 수동 스윙 상태 (POSITION + TRAP_TRAJ, 좌우 동시) ---- */
+int8_t  g_manual_held = 0;           // 앱이 보낸 토글 측: +1=+측, -1=-측(스탠바이)
+float   g_manual_speed = MANUAL_SPEED_DEF;  // 수동 슬루 속도 [모터 turn/s] — 앱 freq 슬라이더로 라이브 설정
+float   g_manual_amp_turn = HARD_LIMIT_TURN; // 수동 토글 목표 크기 [turn] = 앱 강도 슬라이더(최대각 0~90°). HARD_LIMIT 이내
+float   g_manual_cmd = 0;            // 슬루된 현재 위치 명령 [center 기준 turn] — 두 모터 공유(미러보정만) → 항상 동기
+float   g_manual_vel = 0;            // 슬루 속도 [turn/s] (가/감속 제한, 목표서 0으로 착지 = 오버슈트 방지)
 uint8_t g_run = 0;            // 마지막 수신 run
 float   g_motor_sign[NUM_MOTORS] = { +1.0f, -1.0f };  // 적용 중 극성 (기본 = 미러)
 uint8_t g_rx_flags = POL_DEFAULT;   // 마지막 수신 극성 flags
 uint8_t g_pol_flags = POL_DEFAULT;  // 현재 적용된(latch된) 극성 flags
 bool g_restart_pending = false;     // 극성 변경 → fade-out 후 자동 재시작 대기
+bool g_fault_latch = false;         // fault 후 자동 재arm 금지 (run 0→1 = STOP후 재START 해야 해제). 재arm/원점이동 루프 차단
 uint16_t g_seq = 0, g_pkt_cnt = 0;
 uint32_t g_last_pkt_ms = 0;
 uint32_t g_run_t0 = 0, g_stop_t0 = 0;
@@ -289,11 +308,14 @@ void req_monitor(){
 
 /* 양쪽 모터 IDLE + 에러클리어 (어떤 정지 경로든 둘 다 끈다) */
 void fault_stop(const char* why){
-  for(int i=0;i<NUM_MOTORS;++i){ if(g_armed_pump) tx_input_torque(NODE_IDS[i],0.0f); tx_axis_state(NODE_IDS[i], AXIS_IDLE); }
-  delay(2);
+  // IDLE 을 3회 반복 송신 (CAN 프레임 1개 유실돼도 확실히 disarm). 이후 loop 의 enforce 가 추가 보장.
+  for(int rep=0; rep<3; ++rep){
+    for(int i=0;i<NUM_MOTORS;++i){ if(g_armed_pump) tx_input_torque(NODE_IDS[i],0.0f); tx_axis_state(NODE_IDS[i], AXIS_IDLE); }
+    delay(3);
+  }
   for(int i=0;i<NUM_MOTORS;++i){ tx_clear_errors(NODE_IDS[i]); }
-  g_mode=M_IDLE; g_restart_pending=false; g_armed_pump=false;
-  Serial.print(">>> 정지+에러클리어 (양쪽 IDLE) — "); Serial.println(why);
+  g_mode=M_IDLE; g_restart_pending=false; g_armed_pump=false; g_fault_latch=true;
+  Serial.print(">>> 정지+에러클리어 (양쪽 IDLE, 재arm 잠금) — "); Serial.println(why);
 }
 
 // 두 모터 모두 VEL arm 으로 라이브 pos 확보 → POS/PASSTHROUGH soft gain 전환. center 캡처.
@@ -446,6 +468,18 @@ void start_running(float start_phase){
     Serial.println(">>> RUNNING (토크 펌핑) — 세기 0 부터");
     return;
   }
+  if(g_waveform==WAVE_MANUAL){              // 수동 스윙 — POSITION + vel_ff 슬루 (좌우 동시, ±90°)
+    if(!arm_and_center()) return;          // VEL→POS(PASSTHROUGH), pos_gain soft, g_center 캡처 + center hold
+    apply_polarity(g_rx_flags);
+    for(int i=0;i<NUM_MOTORS;++i){
+      tx_pos_gain(NODE_IDS[i], MANUAL_POS_GAIN); delay(2);
+      tx_limits(NODE_IDS[i], MANUAL_VEL_LIMIT, CURRENT_LIM[i]); delay(2);   // 빠른 슬루 위해 vel_limit↑ (RAM only)
+    }
+    g_manual_held=-1; g_manual_cmd=0; g_manual_vel=0;  // -90° 스탠바이로 슬루 출발 (center 에서 시작 → -90°)
+    g_run_t0=millis(); g_mode=M_RUNNING;
+    Serial.println(">>> RUNNING (수동 스윙, POS+ff 슬루 ±90°)");
+    return;
+  }
   if(!arm_and_center()) return;
   apply_polarity(g_rx_flags);     // 시작 시 극성 latch (수신 flags 반영)
   g_phase = start_phase;          // 앱 위상에 맞춰 시작
@@ -472,9 +506,9 @@ void pollUdp(){
           memcpy(&freq,&udpbuf[8],4);
           memcpy(&amp_deg,&udpbuf[12],4);
           memcpy(&phase,&udpbuf[16],4);
-          // 안전 클램프
-          if(freq<0) freq=0; if(freq>FREQ_MAX) freq=FREQ_MAX;
-          g_waveform = (wave<=WAVE_LIFTDROP) ? wave : WAVE_SINE;
+          // 안전 클램프 (전역 상한은 수동속도까지 허용 — 오실레이터는 아래 else 에서 FREQ_MAX 로 재클램프)
+          if(freq<0) freq=0; if(freq>MANUAL_SPEED_MAX) freq=MANUAL_SPEED_MAX;
+          g_waveform = (wave<=WAVE_MANUAL) ? wave : WAVE_SINE;
           if(g_waveform==WAVE_PUMP || g_waveform==WAVE_LIFTDROP){
             // 펌프: phase=게인, amp_deg=진폭. 리프트드롭: 90° 하드코딩 + 좌/우 버튼.
             float pg = phase; if(pg<0)pg=0; if(pg>1)pg=1;
@@ -484,12 +518,24 @@ void pollUdp(){
             if(g_rx_flags & 0x10) g_ld_btn = +1;        // BTN_RIGHT
             else if(g_rx_flags & 0x08) g_ld_btn = -1;   // BTN_LEFT
             else g_ld_btn = 0;
+          } else if(g_waveform==WAVE_MANUAL){
+            // 수동 토글 스윙: BTN_RIGHT set = +90° 측, clear = -90° 측(스탠바이). 앱이 토글 상태를 연속 송신.
+            // 토글 판단은 앱(키 press edge)에서 → ESP 는 받은 상태로 슬루만 → 패킷손실에 강함.
+            // 목표는 ESP 가 ±HARD_LIMIT_TURN 고정 → 90° 이상 명령 안 나감(1차 안전).
+            g_manual_held = (g_rx_flags & 0x10) ? +1 : -1;
+            // freq 필드 = 수동 슬루 속도 [모터 turn/s]. 0.2~MANUAL_SPEED_MAX 클램프.
+            g_manual_speed = freq; if(g_manual_speed<0.2f) g_manual_speed=0.2f;
+            if(g_manual_speed>MANUAL_SPEED_MAX) g_manual_speed=MANUAL_SPEED_MAX;
+            // amp_deg 필드 = 사용자 선택 최대각(0~90°). turn 변환 후 HARD_LIMIT 이내 클램프.
+            float at = deg_to_turn(amp_deg); if(at<0) at=0; if(at>HARD_LIMIT_TURN) at=HARD_LIMIT_TURN;
+            g_manual_amp_turn = at;
           } else {
-            // 오실레이터 모드: 목표 파형 peak 계수로 클램프 (출력 시점 재클램프)
+            // 오실레이터 모드: freq 를 FREQ_MAX 로 재클램프(수동용 상향과 분리). peak 계수로 진폭 클램프.
+            float fosc = (freq>FREQ_MAX)?FREQ_MAX:freq;
             float pv = (g_waveform==WAVE_SWING)?WT_PEAKVEL_SWING:WT_PEAKVEL_SINE;
             float pa = (g_waveform==WAVE_SWING)?WT_PEAKACC_SWING:WT_PEAKACC_SINE;
-            g_freq_t = freq;
-            g_amp_t  = clamp_amp(deg_to_turn(amp_deg), freq, pv, pa);
+            g_freq_t = fosc;
+            g_amp_t  = clamp_amp(deg_to_turn(amp_deg), fosc, pv, pa);
           }
           g_run = run; g_seq = seq; g_pkt_cnt++;
           g_last_pkt_ms = millis();
@@ -610,11 +656,15 @@ void setup(){
   g_mcp_ok = (e1==MCP2515::ERROR_OK && e2==MCP2515::ERROR_OK && e3==MCP2515::ERROR_OK);
   Serial.print("MCP2515 "); Serial.println(g_mcp_ok?"OK":"실패");
 
-  // IMU(BNO085) I2C — 없어도 모터는 정상(센싱 레이어는 선택)
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL); Wire.setClock(400000);
-  if(imu_init()){ g_imu_ok=true; Serial.println(">>> BNO085 OK (센싱 전용, 정지 시 자동 0점)"); }
-  else Serial.println("[경고] BNO085 못 찾음 — 모터는 정상, IMU 없이 진행");
-  g_imu_last_init=millis();
+  // IMU(BNO085) I2C — 없어도 모터는 정상(센싱 레이어는 선택). USE_IMU=false 면 폴링 자체를 중단.
+  if(USE_IMU){
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL); Wire.setClock(400000);
+    if(imu_init()){ g_imu_ok=true; Serial.println(">>> BNO085 OK (센싱 전용, 정지 시 자동 0점)"); }
+    else Serial.println("[경고] BNO085 못 찾음 — 모터는 정상, IMU 없이 진행");
+    g_imu_last_init=millis();
+  } else {
+    Serial.println(">>> IMU 폴링 비활성 (USE_IMU=false). 모터 제어만 동작.");
+  }
 
   // Wi-Fi STA
   WiFi.mode(WIFI_STA);
@@ -636,7 +686,7 @@ void setup(){
 void loop(){
   drainRx();
   pollUdp();
-  imu_poll();
+  if(USE_IMU) imu_poll();
   uint32_t now = millis();
 
   // ---- 전류/버스 모니터 RTR 요청 (40Hz — 피크 더 잘 잡게) ----
@@ -650,8 +700,8 @@ void loop(){
 
   // ---- run 플래그 전이 ----
   if(g_have_pkt){
-    if(g_run==0) g_restart_pending=false;   // 앱 STOP 은 극성-재시작보다 우선
-    if(g_run==1 && g_mode==M_IDLE)      start_running(0.0f);
+    if(g_run==0){ g_restart_pending=false; g_fault_latch=false; }   // STOP = 극성재시작/fault래치 해제
+    if(g_run==1 && g_mode==M_IDLE && !g_fault_latch)  start_running(0.0f);  // fault 후엔 STOP→재START 필요
     else if(g_run==0 && g_mode==M_RUNNING){ g_mode=M_STOPPING; g_stop_t0=now; Serial.println(">>> STOP(app) fade-out"); }
     // 운전 중 극성 변경 → fade-out 후 자동 재시작 (즉시 반전 슬램 방지). 펌프모드 제외.
     else if(g_run==1 && g_mode==M_RUNNING && !g_armed_pump && (g_rx_flags&0x03)!=(g_pol_flags&0x03)){
@@ -669,6 +719,14 @@ void loop(){
   if(g_mode==M_RUNNING && (now-g_last_pkt_ms)>COMM_TIMEOUT_MS){
     g_mode=M_STOPPING; g_stop_t0=now; g_restart_pending=false;
     Serial.println(">>> 통신 두절 → fade-out + IDLE");
+  }
+  // ---- 확실한 disarm 보장: g_mode 가 IDLE 인데 모터가 아직 armed(CL) 면 IDLE 재전송 (프레임 유실 대비) ----
+  // arm 시퀀스는 블로킹이라 이 코드가 그 사이엔 안 돈다 → arm 방해 없음. STOP/fault 후 한쪽 안 꺼지는 것 방지.
+  static uint32_t last_idle_enf=0;
+  if(g_mode==M_IDLE && (now-last_idle_enf)>=100){
+    last_idle_enf=now;
+    for(int i=0;i<NUM_MOTORS;++i)
+      if(st[i].got_hb && st[i].axis_state==AXIS_CLOSED_LOOP) tx_axis_state(NODE_IDS[i], AXIS_IDLE);
   }
   // ---- BOOT = 로컬 비상정지 ----
   static int lb=HIGH; static uint32_t lbm=0;
@@ -689,6 +747,20 @@ void loop(){
           Serial.print(" state="); Serial.print(st[i].axis_state);
           Serial.print(" err=0x"); Serial.println(st[i].axis_error,HEX);
           fault_stop("ODrive fault"); break;
+        }
+      }
+    }
+  }
+  // ---- ±90° 하드리미트 (모든 모드 공통 백스톱) ----
+  // 명령 클램프(1차)를 뚫고 측정 위치가 center±90°×1.1 를 넘으면 = 명령과 무관한 폭주 → 즉시 정지.
+  // 명령은 절대 2.0turn 를 안 넘으므로 2.2turn 트립은 순수 폭주 감지용. (lift-drop 의도적 프리폴은 제외)
+  if(g_mode==M_RUNNING || g_mode==M_STOPPING){
+    float rt=(now-g_run_t0)/1000.0f;
+    bool intentional_idle = (g_waveform==WAVE_LIFTDROP && !g_ld_armed);
+    if(rt>0.4f && !intentional_idle){
+      for(int i=0;i<NUM_MOTORS;++i){
+        if(st[i].got_enc && fabsf(st[i].pos - g_center[i]) > HARD_LIMIT_TURN*1.1f){
+          fault_stop("±90° 하드리미트 초과(폭주 방지)"); break;
         }
       }
     }
@@ -763,9 +835,44 @@ void loop(){
     }
   }
 
+  // ---- 수동 스윙 출력 (POS + vel_ff 슬루, 매 틱 스트리밍 = 두 모터 항상 동기) ----
+  // 목표: 누름=±90°, 놓음/정지=원점(center). 공유 g_manual_cmd 를 g_manual_speed[turn/s] 로 슬루.
+  // 매 틱 두 모터에 같은 cmd(미러보정만) 전송 → 프레임 1개 빠져도 다음 틱 교정, 절대 따로 안 놂.
+  // 사인/그네와 같은 검증된 PASSTHROUGH 경로 → 확실히 움직이고 soft 게인이라 매끈.
+  static uint32_t last_txm=0;
+  if(!g_armed_pump && g_waveform==WAVE_MANUAL &&
+     (g_mode==M_RUNNING||g_mode==M_STOPPING) && (now-last_txm)>=(1000/UPDATE_HZ)){
+    last_txm=now;
+    float dt=1.0f/UPDATE_HZ;
+    float tgt;                                       // 목표 [center 기준 turn]
+    if(g_mode==M_STOPPING)    tgt = 0.0f;               // 정지 → center 복귀 후 IDLE
+    else if(g_manual_held>0)  tgt = +g_manual_amp_turn; // +측(선택 최대각) 대기
+    else                      tgt = -g_manual_amp_turn; // -측(스탠바이) 대기
+    // 가/감속 제한 슬루: 목표에 v=0 로 착지 → 관성 오버슈트 없음(90° 초과 방지). vmax=슬라이더, a=속도비례.
+    float a = g_manual_speed*MANUAL_ACCEL_K;                 // 빠를수록 세게 가/감속 (스윕 안에서 도달+착지)
+    float err = tgt - g_manual_cmd;
+    float v_decel = sqrtf(2.0f*a*fabsf(err));               // 남은 거리에서 감속해 멈출 수 있는 최대 속도
+    float v_lim   = (g_manual_speed<MANUAL_SPEED_MAX)?g_manual_speed:MANUAL_SPEED_MAX;
+    float v_des   = (err>=0?1.0f:-1.0f) * ((v_decel<v_lim)?v_decel:v_lim);
+    float dv = a*dt;                                         // 속도 변화도 가속한계로 제한
+    if(v_des-g_manual_vel >  dv) g_manual_vel += dv;
+    else if(v_des-g_manual_vel < -dv) g_manual_vel -= dv;
+    else g_manual_vel = v_des;
+    g_manual_cmd += g_manual_vel*dt;
+    if(g_manual_cmd> HARD_LIMIT_TURN){ g_manual_cmd= HARD_LIMIT_TURN; if(g_manual_vel>0) g_manual_vel=0; }  // 명령 하드클램프 ±90°
+    if(g_manual_cmd<-HARD_LIMIT_TURN){ g_manual_cmd=-HARD_LIMIT_TURN; if(g_manual_vel<0) g_manual_vel=0; }
+    for(int i=0;i<NUM_MOTORS;++i)
+      tx_input_pos(NODE_IDS[i], g_center[i] + g_motor_sign[i]*g_manual_cmd, g_motor_sign[i]*g_manual_vel);
+    if(g_mode==M_STOPPING && fabsf(g_manual_cmd)<0.05f && fabsf(g_manual_vel)<0.2f){
+      for(int rep=0;rep<3;++rep){ for(int i=0;i<NUM_MOTORS;++i){ tx_input_pos(NODE_IDS[i], g_center[i], 0.0f); tx_axis_state(NODE_IDS[i], AXIS_IDLE); } delay(2); }
+      g_mode=M_IDLE; g_manual_held=0; g_manual_vel=0; Serial.println(">>> 수동 정지 (center 복귀 후 IDLE)");
+    }
+  }
+
   // ---- 200Hz 오실레이터 출력 (두 모터) ----
   static uint32_t last_tx=0;
-  if(!g_armed_pump && (g_mode==M_RUNNING||g_mode==M_STOPPING) && (now-last_tx)>=(1000/UPDATE_HZ)){
+  if(!g_armed_pump && g_waveform!=WAVE_MANUAL &&
+     (g_mode==M_RUNNING||g_mode==M_STOPPING) && (now-last_tx)>=(1000/UPDATE_HZ)){
     last_tx=now;
     float dt=1.0f/UPDATE_HZ;
     // 파라미터 부드럽게 추종
@@ -830,7 +937,8 @@ void loop(){
     Serial.print(" ["); Serial.print(m); Serial.print("] ");
     Serial.print("f="); Serial.print(g_freq,2);
     Serial.print(" amp="); Serial.print(g_amp,3);
-    Serial.print(" wav="); Serial.print(g_waveform==WAVE_LIFTDROP?"LIFT":g_waveform==WAVE_PUMP?"PUMP":g_waveform==WAVE_SWING?"swing":"sine");
+    Serial.print(" wav="); Serial.print(g_waveform==WAVE_MANUAL?"MANUAL":g_waveform==WAVE_LIFTDROP?"LIFT":g_waveform==WAVE_PUMP?"PUMP":g_waveform==WAVE_SWING?"swing":"sine");
+    if(g_waveform==WAVE_MANUAL){ Serial.print(" held="); Serial.print(g_manual_held); Serial.print(" spd="); Serial.print(g_manual_speed,1); }
     if(g_armed_pump){
       if(g_waveform==WAVE_LIFTDROP){ Serial.print(g_ld_btn>0?" [우→":g_ld_btn<0?" [좌→":" [프리폴"); Serial.print(g_ld_btn?g_ld_to:0.0f,2); Serial.print("]"); }
       else { Serial.print(" pgain="); Serial.print(g_pump_gain,3); }

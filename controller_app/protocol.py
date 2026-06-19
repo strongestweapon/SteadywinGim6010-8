@@ -57,6 +57,7 @@ WAVE_SINE = 0
 WAVE_SWING = 1   # 큰 진폭 진자(그네) — waveforms.py 참고
 WAVE_PUMP = 2    # 토크 펌핑(anti-damping 증폭) — 토크모드
 WAVE_LIFTDROP = 3  # 들어올림+프리폴 래칫 — 토크모드
+WAVE_MANUAL = 4    # 수동 스윙 (키보드/조이스틱, 위치제어 ±90°). amp_deg=목표 출력각(부호)
 # 토크 모드 패킷 재해석: amp_deg=진폭(±출력°), phase=세기(0..1), freq 무시
 PUMP_AMP_MAX = 60.0   # 진폭 슬라이더 100% [출력°]
 

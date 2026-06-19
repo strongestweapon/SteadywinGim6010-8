@@ -1,3 +1,4 @@
 PySide6>=6.6
 pyqtgraph>=0.13
 numpy>=1.24
+pygame>=2.5        # PS5(DualSense) 등 조이스틱 입력 (선택 — 없으면 키보드만 동작)
