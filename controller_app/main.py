@@ -328,8 +328,8 @@ class Controller(QtWidgets.QMainWindow):
 
         # 좌우 패널 — 각 패널 위 중앙에 "제어 대상" 라디오, 선택된 패널은 초록 강조
         panels = QtWidgets.QHBoxLayout()
-        self.A = SystemPanel("A", "192.168.0.46")
-        self.B = SystemPanel("B", "192.168.0.47")
+        self.A = SystemPanel("A", "192.168.0.44")   # 무대 오른쪽 (기존 ESP32)
+        self.B = SystemPanel("B", "192.168.0.46")   # 무대 왼쪽 (새 ESP32)
         self.tgt_a = QtWidgets.QRadioButton("● A 를 제어")
         self.tgt_b = QtWidgets.QRadioButton("● B 를 제어")
         self.tgt_a.setChecked(True)
@@ -337,7 +337,8 @@ class Controller(QtWidgets.QMainWindow):
         self._tgt_grp.addButton(self.tgt_a)
         self._tgt_grp.addButton(self.tgt_b)
         self.tgt_a.toggled.connect(self._refresh_highlight)
-        for radio, panel in ((self.tgt_a, self.A), (self.tgt_b, self.B)):
+        # 무대 배치에 맞춰 왼쪽=B, 오른쪽=A 로 표시
+        for radio, panel in ((self.tgt_b, self.B), (self.tgt_a, self.A)):
             radio.setStyleSheet("font-weight:bold; font-size:13px;")
             col = QtWidgets.QVBoxLayout()
             rrow = QtWidgets.QHBoxLayout()
