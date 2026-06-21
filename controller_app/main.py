@@ -1,18 +1,18 @@
 """
 main.py — 듀얼 ESP32 모터 컨트롤러 데스크탑 앱 (PySide6)
 ===============================================================================
-ESP32 **2대**(각각 모터쌍 1조)를 한 앱에서 제어. 좌우 2패널 + LINK(동기) 토글.
+ESP32 **2대**(각각 모터쌍 1조)를 한 앱에서 제어. 좌우 2패널(자유 연주) + 아래 공연(씬).
 
 레이아웃:
-  - 상단(공유): LINK 토글 / drop 시뮬 / PS5 상태·대상
-  - 좌/우 패널: IP·포트 / 속도(Hz) / 강도(진폭%) / 극성 / START·STOP / IMU 0점 / 상태
-  - LINK ON  : A 가 마스터 → B 가 A 를 미러(컨트롤 비활성). PS5 는 A 에 적용(둘 다 움직임).
-  - LINK OFF : 각 패널 독립. PS5 는 "대상"으로 고른 패널만.
+  - 상단(공유): drop 시뮬 / PS5 상태·대상
+  - 좌/우 패널(자유 연주): IP·포트 / 속도(Hz) / 강도(진폭%) / 극성 / 동작·정지 / IMU 0점 / 상태
+  - 아래 공연(씬): 씬 칸들(A/B on·freq·amp·극성·위상차) — 누르면 그 씬으로 부드럽게 전환
+  - PS5/키보드는 "제어 대상"으로 고른 패널만 조작.
 
 전송: 소켓 1개로 두 IP 에 각각 UDP 송신. 텔레메트리는 발신 IP 로 구분 수신.
 조작:
   - 사인 : 속도=주파수(Hz), 강도=진폭%
-  - PS5  : ○=START, ✕=STOP. (LINK 따라 둘다/선택 패널)
+  - PS5  : ○=동작, ✕=정지 (제어 대상 패널)
 
 실행: python main.py   (ESP32 없이도 송신만 동작)
 """
@@ -206,11 +206,6 @@ class SystemPanel(QtWidgets.QGroupBox):
             self.setTitle(f"시스템 {self.name}  ({self.scene_label}{' *수정' if self.scene_dirty else ' 적용중'})")
         else:
             self.setTitle(f"시스템 {self.name}")
-
-    def set_controls_enabled(self, en: bool):
-        for w in (self.speed_slider, self.angle_slider, self.pol_m1,
-                  self.pol_m2, self.btn, self.tare_btn):
-            w.setEnabled(en)
 
     # ---------------------------------------------------------------- 씬 전환
     def begin_transition(self, speed_units: int, angle_pct: int, on: bool,
@@ -459,9 +454,6 @@ class Controller(QtWidgets.QMainWindow):
 
         # 상단 공유 바
         top = QtWidgets.QHBoxLayout()
-        self.link_cb = QtWidgets.QCheckBox("LINK 동기 (A=마스터, B 미러)")
-        self.link_cb.toggled.connect(self._update_active_enabled)
-        top.addWidget(self.link_cb)
         top.addWidget(QtWidgets.QLabel("drop 시뮬%"))
         self.drop_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.drop_slider.setRange(0, 90)
@@ -497,7 +489,7 @@ class Controller(QtWidgets.QMainWindow):
         root.addLayout(panels)
 
         hint = QtWidgets.QLabel(
-            "PS5: ○=START ✕=STOP.  LINK 켜면 A가 둘 다 제어.")
+            "PS5: ○=동작 ✕=정지 (제어 대상 패널).")
         hint.setStyleSheet("color:#888;")
         root.addWidget(hint)
 
@@ -552,7 +544,7 @@ class Controller(QtWidgets.QMainWindow):
     def _make_scene_col(self, i: int) -> QtWidgets.QGroupBox:
         """씬 한 칸 위젯 생성. self.sw / self.scene_btns 에 순서대로 append."""
         col = QtWidgets.QGroupBox()
-        col.setMinimumWidth(250)
+        col.setMinimumWidth(330)   # A1/A2 가 같은 줄에 들어가 넓어짐
         cv = QtWidgets.QVBoxLayout(col)
 
         btn = QtWidgets.QPushButton()
@@ -568,28 +560,27 @@ class Controller(QtWidgets.QMainWindow):
 
         nob = QtWidgets.QAbstractSpinBox.NoButtons   # 위아래 화살표 없이 타이핑만 (공간 절약)
 
+        # A 줄 = [A 켜기] freq amp + 모터별 극성반전 A1 A2  (node2=A2 미러 기본 반전)
         a_on = QtWidgets.QCheckBox("A")
         a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz"); a_freq.setButtonSymbols(nob)
         a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 100); a_amp.setSuffix(" %"); a_amp.setButtonSymbols(nob)
-        ar = QtWidgets.QHBoxLayout(); ar.addWidget(a_on); ar.addWidget(a_freq); ar.addWidget(a_amp)
+        a_p1 = QtWidgets.QCheckBox("A1"); a_p1.setToolTip("A 모터1 극성반전")
+        a_p2 = QtWidgets.QCheckBox("A2"); a_p2.setToolTip("A 모터2 극성반전")
+        ar = QtWidgets.QHBoxLayout()
+        for x in (a_on, a_freq, a_amp, a_p1, a_p2):
+            ar.addWidget(x)
         cv.addLayout(ar)
 
+        # B 줄 = [B 켜기] freq amp + 극성반전 B1 B2
         b_on = QtWidgets.QCheckBox("B")
         b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz"); b_freq.setButtonSymbols(nob)
         b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 100); b_amp.setSuffix(" %"); b_amp.setButtonSymbols(nob)
-        br = QtWidgets.QHBoxLayout(); br.addWidget(b_on); br.addWidget(b_freq); br.addWidget(b_amp)
-        cv.addLayout(br)
-
-        # 극성 반전 (모터별) — node2=모터2 미러 기본 반전
-        a_p1 = QtWidgets.QCheckBox("A1"); a_p1.setToolTip("A 모터1 극성반전")
-        a_p2 = QtWidgets.QCheckBox("A2"); a_p2.setToolTip("A 모터2 극성반전")
         b_p1 = QtWidgets.QCheckBox("B1"); b_p1.setToolTip("B 모터1 극성반전")
         b_p2 = QtWidgets.QCheckBox("B2"); b_p2.setToolTip("B 모터2 극성반전")
-        polr = QtWidgets.QHBoxLayout(); polr.addWidget(QtWidgets.QLabel("반전"))
-        for cb in (a_p1, a_p2, b_p1, b_p2):
-            polr.addWidget(cb)
-        polr.addStretch(1)
-        cv.addLayout(polr)
+        br = QtWidgets.QHBoxLayout()
+        for x in (b_on, b_freq, b_amp, b_p1, b_p2):
+            br.addWidget(x)
+        cv.addLayout(br)
 
         ph = QtWidgets.QSpinBox(); ph.setRange(0, 359); ph.setSuffix("°"); ph.setButtonSymbols(nob)
         pr = QtWidgets.QHBoxLayout(); pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph); pr.addStretch(1)
@@ -707,8 +698,6 @@ class Controller(QtWidgets.QMainWindow):
     # ---- 씬 적용 + 스태거드 스타트 엔진 ----
     def _apply_scene(self, idx: int):
         sc = self.scenes[idx]
-        if self.link_cb.isChecked():
-            self.link_cb.setChecked(False)   # 씬은 A/B 독립 → LINK 해제
         self.A.set_scene(sc["name"]); self.B.set_scene(sc["name"])   # 제목에 '적용중' 표시
         # 극성 반전을 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
         self.A.pol_m1.setChecked(sc["a_pol1"]); self.A.pol_m2.setChecked(sc["a_pol2"])
@@ -741,16 +730,12 @@ class Controller(QtWidgets.QMainWindow):
         self.B.step_transition()
 
     def _update_active_enabled(self):
-        linked = self.link_cb.isChecked()
-        self.tgt_a.setEnabled(not linked)
-        self.tgt_b.setEnabled(not linked)
         self._refresh_highlight()
 
     def _refresh_highlight(self):
-        """제어 대상 강조. 통신두절(빨강)은 패널 update_style 이 우선 처리."""
-        linked = self.link_cb.isChecked()
-        self.A.active = linked or self.tgt_a.isChecked()
-        self.B.active = linked or self.tgt_b.isChecked()
+        """제어 대상(PS5/키보드) 패널 초록 강조. 통신두절(빨강)은 update_style 이 우선."""
+        self.A.active = self.tgt_a.isChecked()
+        self.B.active = self.tgt_b.isChecked()
         self.A.update_style()
         self.B.update_style()
 
@@ -759,8 +744,7 @@ class Controller(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- 입력
     def _input_targets(self):
-        # LINK 면 A 만 조작(=B 미러로 따라옴), 아니면 선택 패널
-        return [self.A] if self.link_cb.isChecked() else [self._active()]
+        return [self._active()]   # PS5/키보드는 제어 대상 패널만
 
     def _init_js(self):
         try:
@@ -801,23 +785,14 @@ class Controller(QtWidgets.QMainWindow):
             for p in tgts:
                 p.start()
         self._xprev, self._oprev = xb, ob
-        scope = "A+B (LINK)" if self.link_cb.isChecked() else self._active().name
-        self.pad_lbl.setText(f"PS5: {self._js_name[:16]}  대상 {scope}")
+        self.pad_lbl.setText(f"PS5: {self._js_name[:16]}  대상 {self._active().name}")
 
     # ---------------------------------------------------------------- 60Hz
     def _tick(self):
         dt = 1.0 / SEND_HZ
         drop = self.drop_slider.value()
-        link = self.link_cb.isChecked()
 
         self._poll_pad()
-
-        if link:
-            self._mirror(self.A, self.B)
-            self.B.set_controls_enabled(False)
-        else:
-            self.B.set_controls_enabled(True)
-
         self._show_step()      # 씬 전환 ramp + 스태거드 스타트 (슬라이더를 목표로 이동)
 
         self.A.tick(dt, drop, self.sock)
@@ -828,17 +803,6 @@ class Controller(QtWidgets.QMainWindow):
         self.B.refresh_status()
         self.A.update_style()   # 통신두절↔복구 시 테두리 색 라이브 갱신 (변경 시에만 적용)
         self.B.update_style()
-
-    def _mirror(self, a: SystemPanel, b: SystemPanel):
-        """LINK: A → B 미러 (IP/Port 제외한 제어값 — 속도/강도/극성/run)."""
-        if b.speed_slider.value() != a.speed_slider.value():
-            b.speed_slider.setValue(a.speed_slider.value())
-        if b.angle_slider.value() != a.angle_slider.value():
-            b.angle_slider.setValue(a.angle_slider.value())
-        b.pol_m1.setChecked(a.pol_m1.isChecked())
-        b.pol_m2.setChecked(a.pol_m2.isChecked())
-        if b.running != a.running:
-            b.btn.setChecked(a.running)
 
     def _recv_telem(self):
         try:
