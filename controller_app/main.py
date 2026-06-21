@@ -29,6 +29,10 @@ from PySide6 import QtWidgets, QtCore, QtGui
 import numpy as np
 import pyqtgraph as pg
 
+# 다크(나이트) 모드 — 그래프 배경/전경
+pg.setConfigOption("background", "#1e1e1e")
+pg.setConfigOption("foreground", "#a0a0a0")
+
 try:
     import pygame   # PS5(DualSense) 등 조이스틱 (선택 — 없으면 키보드만)
     _HAS_PYGAME = True
@@ -52,7 +56,7 @@ class SystemPanel(QtWidgets.QGroupBox):
     """ESP32 1대 분의 컨트롤 + 상태. 자기 IP 로 패킷을 만들어 보낸다(소켓은 공유)."""
 
     def __init__(self, name: str, default_ip: str):
-        super().__init__(f"시스템 {name}")
+        super().__init__(f"System {name}")
         self.name = name
         self._default_ip = default_ip
         # 현재 반영 중인 씬 (제목에 표시). 수동 조작하면 dirty=수정 표시.
@@ -95,7 +99,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         g.addWidget(self.port_edit, r, 3)
 
         r += 1
-        g.addWidget(QtWidgets.QLabel("속도"), r, 0)
+        g.addWidget(QtWidgets.QLabel("Speed"), r, 0)
         self.speed_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.speed_slider.setRange(1, int(proto.FREQ_MAX * 10))   # 0.1 단위
         self.speed_slider.setValue(10)
@@ -106,10 +110,10 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.speed_slider.sliderMoved.connect(self._user_touch)   # 사용자 드래그만 (씬 ramp 의 setValue 는 제외)
 
         r += 1
-        g.addWidget(QtWidgets.QLabel("강도"), r, 0)
+        g.addWidget(QtWidgets.QLabel("Amplitude"), r, 0)
         self.angle_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.angle_slider.setRange(0, 100)
-        self.angle_slider.setValue(60)
+        self.angle_slider.setRange(0, int(proto.AMP_DEG_MAX))   # 출력 진폭 [°] (0~60)
+        self.angle_slider.setValue(30)
         g.addWidget(self.angle_slider, r, 1, 1, 2)
         self.angle_lbl = QtWidgets.QLabel("")
         g.addWidget(self.angle_lbl, r, 3)
@@ -117,25 +121,25 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.angle_slider.sliderMoved.connect(self._user_touch)
 
         r += 1
-        g.addWidget(QtWidgets.QLabel("극성"), r, 0)
-        self.twist = QtWidgets.QCheckBox("두 모터 반대방향 (트위스트)")
-        self.twist.setToolTip("안 누름=두 모터 같은 방향(평행, 기본).  누름=반대 방향(트위스트).")
+        g.addWidget(QtWidgets.QLabel("Polarity"), r, 0)
+        self.twist = QtWidgets.QCheckBox("Two motors opposite (twist)")
+        self.twist.setToolTip("Unchecked = two motors same direction (parallel, default).  Checked = opposite (twist).")
         self.twist.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 적용 setChecked 는 제외)
         g.addWidget(self.twist, r, 1, 1, 3)
 
         r += 1
-        self.btn = QtWidgets.QPushButton("▶ 동작")
+        self.btn = QtWidgets.QPushButton("▶ Run")
         self.btn.setCheckable(True)
         self.btn.setStyleSheet("font-weight:bold; padding:10px;")
         self.btn.toggled.connect(self._toggle)
         self.btn.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 start/stop 의 setChecked 는 제외)
         g.addWidget(self.btn, r, 0, 1, 2)
-        self.tare_btn = QtWidgets.QPushButton("IMU 0점")
+        self.tare_btn = QtWidgets.QPushButton("IMU zero")
         self.tare_btn.clicked.connect(lambda: setattr(self, "tare_ticks", 6))
         g.addWidget(self.tare_btn, r, 2, 1, 2)
 
         r += 1
-        self.status_lbl = QtWidgets.QLabel("정지")
+        self.status_lbl = QtWidgets.QLabel("Idle")
         self.status_lbl.setStyleSheet("font-family:monospace;")
         self.status_lbl.setWordWrap(True)
         g.addWidget(self.status_lbl, r, 0, 1, 4)
@@ -144,8 +148,8 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.plot = pg.PlotWidget()
         self.plot.setMinimumHeight(140)
         self.plot.setYRange(-PLOT_LIMIT_DEG * 1.1, PLOT_LIMIT_DEG * 1.1)
-        self.plot.setLabel("left", "명령", units="deg")
-        self.plot.setLabel("bottom", "시간", units="s")
+        self.plot.setLabel("left", "cmd", units="deg")
+        self.plot.setLabel("bottom", "time", units="s")
         self.plot.showGrid(x=True, y=True, alpha=0.3)
         self.curve = self.plot.plot(pen=pg.mkPen("#33cc88", width=2))
         self._t_axis = np.linspace(-PLOT_SECONDS, 0.0, PLOT_N)
@@ -161,7 +165,7 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     def _toggle(self, on: bool):
         self.running = on
-        self.btn.setText("■ 정지" if on else "▶ 동작")
+        self.btn.setText("■ Stop" if on else "▶ Run")
         if on:
             self.pk_i = 0.0
             self.pk_vmin = 999.0
@@ -195,9 +199,9 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     def _update_title(self):
         if self.scene_label:
-            self.setTitle(f"시스템 {self.name}  ({self.scene_label}{' *수정' if self.scene_dirty else ' 적용중'})")
+            self.setTitle(f"System {self.name}  ({self.scene_label}{' *edited' if self.scene_dirty else ' active'})")
         else:
-            self.setTitle(f"시스템 {self.name}")
+            self.setTitle(f"System {self.name}")
 
     # ---------------------------------------------------------------- 씬 전환
     def begin_transition(self, speed_units: int, angle_pct: int, on: bool,
@@ -250,16 +254,19 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     def _labels(self):
         freq = self.speed_slider.value() / 10.0
-        drive = self.angle_slider.value()
+        drive = self.angle_slider.value()           # 진폭 [출력°]
+        mx = proto.amp_deg_max(freq, 1.0)
         self.speed_lbl.setText(f"{freq:.1f} Hz")
-        self.angle_lbl.setText(f"±{drive / 100.0 * proto.amp_deg_max(freq, 1.0):.0f}°")
+        if drive > mx:
+            self.angle_lbl.setText(f"±{mx:.0f}° (max)")   # 이 주파수 한계로 클램프
+        else:
+            self.angle_lbl.setText(f"±{drive}°")
 
     # ---------------------------------------------------------------- 송신
     def tick(self, dt: float, drop_pct: int, sock: socket.socket):
         freq = self.speed_slider.value() / 10.0
-        drive = self.angle_slider.value()
-
-        amp_deg = drive / 100.0 * proto.amp_deg_max(freq, 1.0)
+        drive = self.angle_slider.value()                       # 진폭 [출력°]
+        amp_deg = min(float(drive), proto.amp_deg_max(freq, 1.0))  # 주파수 한계로 클램프(안전)
         if self.running:
             self.phase += 2.0 * math.pi * freq * dt
             if self.phase > 2.0 * math.pi:
@@ -337,15 +344,15 @@ class SystemPanel(QtWidgets.QGroupBox):
             f"QGroupBox::title{{subcontrol-origin:margin; left:10px; color:{title}; font-weight:bold;}}")
 
     def refresh_status(self):
-        run = "RUN" if self.running else "정지"
+        run = "RUN" if self.running else "IDLE"
         state = self.conn_status()
         if state != "ok":
             # 통신두절 = drop 의 완전손실 상태. 처음 시작 때 응답없어도 여기로.
             if self._status_red is not True:
                 self.status_lbl.setStyleSheet("font-family:monospace; color:#ff5555; font-weight:bold;")
                 self._status_red = True
-            msg = "응답없음 — ESP32/IP/전원 확인" if state == "never" else "신호끊김"
-            self.status_lbl.setText(f"{run}   ⛔ 통신두절 ({msg})")
+            msg = "no response — check ESP32 / IP / power" if state == "never" else "signal lost"
+            self.status_lbl.setText(f"{run}   ⛔ DISCONNECTED ({msg})")
             return
         if self._status_red is not False:
             self.status_lbl.setStyleSheet("font-family:monospace;")
@@ -353,14 +360,14 @@ class SystemPanel(QtWidgets.QGroupBox):
         t = self.telem
         warn = ""
         if t["ibus"] > 3.0:
-            warn = " ⚠과전류"
+            warn = " ⚠OVERCURRENT"
         elif 1.0 < t["vbus"] < 19.0:
-            warn = " ⚠저전압"
-        imu = f"tilt {t['tilt']:.0f}°" if t["imu_ok"] else "IMU없음"
+            warn = " ⚠LOW VOLT"
+        imu = f"tilt {t['tilt']:.0f}°" if t["imu_ok"] else "no IMU"
         vmin = f"{self.pk_vmin:.1f}" if self.pk_vmin < 900 else "—"
         self.status_lbl.setText(
             f"{run}   I {t['m1_iq']:+.1f}/{t['m2_iq']:+.1f}A  V {t['vbus']:.1f}  "
-            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   실drop {self.drop_meas:.0f}%   "
+            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   drop {self.drop_meas:.0f}%   "
             f"pk: Imax {self.pk_i:.1f}A  Vmin {vmin}")
 
 
@@ -370,10 +377,10 @@ def _rand100() -> int:
     return random.randint(0, 99)
 
 
-# 씬 한 개의 기본값 (twist=False=두 모터 같이/평행 기본)
+# 씬 한 개의 기본값 (진폭=출력° / twist=False=두 모터 같이·평행 기본)
 _SCENE_DEFAULTS = {
-    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 50, "a_twist": False,
-    "b_on": True, "b_freq": 0.4, "b_amp": 50, "b_twist": False, "phase": 0,
+    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 30, "a_twist": False,
+    "b_on": True, "b_freq": 0.4, "b_amp": 30, "b_twist": False, "phase": 0,
 }
 
 
@@ -390,11 +397,11 @@ def _default_scenes():
         return _norm_scene({"name": name, "a_on": a_on, "a_freq": a_f, "a_amp": a_a,
                             "b_on": b_on, "b_freq": b_f, "b_amp": b_a, "phase": ph})
     return [
-        s("씬 1 동상", True, 0.4, 60, True, 0.4, 60, 0),
-        s("씬 2 역상", True, 0.4, 60, True, 0.4, 60, 180),
-        s("씬 3 A만", True, 1.0, 40, False, 1.0, 40, 0),
-        s("씬 4 B만", False, 1.0, 40, True, 1.0, 40, 0),
-        s("씬 5 정지", False, 0.4, 0, False, 0.4, 0, 0),
+        s("1 In-phase", True, 0.4, 40, True, 0.4, 40, 0),
+        s("2 Anti-phase", True, 0.4, 40, True, 0.4, 40, 180),
+        s("3 A only", True, 1.0, 30, False, 1.0, 30, 0),
+        s("4 B only", False, 1.0, 30, True, 1.0, 30, 0),
+        s("5 Stop", False, 0.4, 0, False, 0.4, 0, 0),
     ]
 
 
@@ -411,7 +418,7 @@ def _phase_crossed(prev: float, cur: float, target: float) -> bool:
 class Controller(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Steadywin 듀얼 ESP32 컨트롤러")
+        self.setWindowTitle("Steadywin Dual ESP32 Controller")
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
@@ -445,7 +452,7 @@ class Controller(QtWidgets.QMainWindow):
 
         # 상단 공유 바
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(QtWidgets.QLabel("drop 시뮬%"))
+        top.addWidget(QtWidgets.QLabel("drop sim%"))
         self.drop_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.drop_slider.setRange(0, 90)
         self.drop_slider.setMaximumWidth(120)
@@ -459,8 +466,8 @@ class Controller(QtWidgets.QMainWindow):
         panels = QtWidgets.QHBoxLayout()
         self.A = SystemPanel("A", "192.168.0.44")   # 무대 오른쪽 (기존 ESP32)
         self.B = SystemPanel("B", "192.168.0.46")   # 무대 왼쪽 (새 ESP32)
-        self.tgt_a = QtWidgets.QRadioButton("● A 를 제어")
-        self.tgt_b = QtWidgets.QRadioButton("● B 를 제어")
+        self.tgt_a = QtWidgets.QRadioButton("● Control A")
+        self.tgt_b = QtWidgets.QRadioButton("● Control B")
         self.tgt_a.setChecked(True)
         self._tgt_grp = QtWidgets.QButtonGroup(self)
         self._tgt_grp.addButton(self.tgt_a)
@@ -480,7 +487,7 @@ class Controller(QtWidgets.QMainWindow):
         root.addLayout(panels)
 
         hint = QtWidgets.QLabel(
-            "PS5: ○=동작 ✕=정지 (제어 대상 패널).")
+            "PS5: ○=Run  ✕=Stop (controls the targeted panel).")
         hint.setStyleSheet("color:#888;")
         root.addWidget(hint)
 
@@ -491,7 +498,7 @@ class Controller(QtWidgets.QMainWindow):
     # ---------------------------------------------------------------- 공연(씬) UI
     def _build_show(self):
         """씬을 각각 [적용버튼 + 칸 안에 A/B 켜기·freq·amp·위상차]로 나란히. + 씬 추가/삭제·가로스크롤."""
-        box = QtWidgets.QGroupBox("공연 (씬) — 버튼 누르면 그 씬으로 부드럽게 전환")
+        box = QtWidgets.QGroupBox("Show (Scenes) — press a button to crossfade to that scene")
         outer = QtWidgets.QVBoxLayout(box)
         self._sw_block = False
         self.scene_btns = []
@@ -510,22 +517,22 @@ class Controller(QtWidgets.QMainWindow):
 
         # 공통 하단: + 씬 추가 / 전환시간 / 저장·불러오기
         bot = QtWidgets.QHBoxLayout()
-        addb = QtWidgets.QPushButton("+ 씬 추가"); addb.clicked.connect(self._add_scene)
+        addb = QtWidgets.QPushButton("+ Add scene"); addb.clicked.connect(self._add_scene)
         bot.addWidget(addb)
-        bot.addWidget(QtWidgets.QLabel("전환시간"))
+        bot.addWidget(QtWidgets.QLabel("Crossfade"))
         self.crossfade_spin = QtWidgets.QDoubleSpinBox()
         self.crossfade_spin.setRange(0.0, 5.0); self.crossfade_spin.setSingleStep(0.1)
         self.crossfade_spin.setValue(CROSSFADE_S); self.crossfade_spin.setSuffix(" s")
         bot.addWidget(self.crossfade_spin)
         bot.addStretch(1)
-        sv = QtWidgets.QPushButton("저장"); sv.clicked.connect(self._save_shows)
-        ld = QtWidgets.QPushButton("불러오기"); ld.clicked.connect(self._load_shows)
+        sv = QtWidgets.QPushButton("Save"); sv.clicked.connect(self._save_shows)
+        ld = QtWidgets.QPushButton("Load"); ld.clicked.connect(self._load_shows)
         bot.addWidget(sv); bot.addWidget(ld)
         outer.addLayout(bot)
 
         note = QtWidgets.QLabel(
-            "위상차 = 스태거드 스타트(B가 켜질 때 A 위상에 맞춰 시작). "
-            "둘 다 켜진 채 위상만 바꾸려면 그 씬에서 B를 한 번 재시작(STOP 후 적용).")
+            "Phase = staggered start (B starts when A reaches the offset). "
+            "To change phase while both already run, restart B in that scene (Stop, then apply).")
         note.setStyleSheet("color:#888;"); note.setWordWrap(True)
         outer.addWidget(note)
 
@@ -546,7 +553,7 @@ class Controller(QtWidgets.QMainWindow):
         self.scene_btns.append(btn)
 
         name = QtWidgets.QLineEdit()
-        name.setPlaceholderText("이름")
+        name.setPlaceholderText("Name")
         cv.addWidget(name)
 
         nob = QtWidgets.QAbstractSpinBox.NoButtons   # 위아래 화살표 없이 타이핑만 (공간 절약)
@@ -554,8 +561,8 @@ class Controller(QtWidgets.QMainWindow):
         # A 줄 = [A 켜기] freq amp [반대=트위스트]
         a_on = QtWidgets.QCheckBox("A")
         a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz"); a_freq.setButtonSymbols(nob)
-        a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 100); a_amp.setSuffix(" %"); a_amp.setButtonSymbols(nob)
-        a_tw = QtWidgets.QCheckBox("반대"); a_tw.setToolTip("A 두 모터 반대방향(트위스트). 안 누르면 같이(평행)")
+        a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, int(proto.AMP_DEG_MAX)); a_amp.setSuffix("°"); a_amp.setButtonSymbols(nob)
+        a_tw = QtWidgets.QCheckBox("Twist"); a_tw.setToolTip("A: two motors opposite direction (twist). Unchecked = same direction (parallel)")
         ar = QtWidgets.QHBoxLayout()
         for x in (a_on, a_freq, a_amp, a_tw):
             ar.addWidget(x)
@@ -564,8 +571,8 @@ class Controller(QtWidgets.QMainWindow):
         # B 줄 = [B 켜기] freq amp [반대=트위스트]
         b_on = QtWidgets.QCheckBox("B")
         b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz"); b_freq.setButtonSymbols(nob)
-        b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 100); b_amp.setSuffix(" %"); b_amp.setButtonSymbols(nob)
-        b_tw = QtWidgets.QCheckBox("반대"); b_tw.setToolTip("B 두 모터 반대방향(트위스트). 안 누르면 같이(평행)")
+        b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, int(proto.AMP_DEG_MAX)); b_amp.setSuffix("°"); b_amp.setButtonSymbols(nob)
+        b_tw = QtWidgets.QCheckBox("Twist"); b_tw.setToolTip("B: two motors opposite direction (twist). Unchecked = same direction (parallel)")
         br = QtWidgets.QHBoxLayout()
         for x in (b_on, b_freq, b_amp, b_tw):
             br.addWidget(x)
@@ -575,9 +582,9 @@ class Controller(QtWidgets.QMainWindow):
         pr = QtWidgets.QHBoxLayout(); pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph); pr.addStretch(1)
         cv.addLayout(pr)
 
-        cap = QtWidgets.QPushButton("현재값 담기")
+        cap = QtWidgets.QPushButton("Capture current")
         cap.clicked.connect(lambda _=False, idx=i: self._capture_scene(idx))
-        delb = QtWidgets.QPushButton("✕ 삭제")
+        delb = QtWidgets.QPushButton("✕ Delete")
         delb.clicked.connect(lambda _=False, idx=i: self._del_scene(idx))
         cr = QtWidgets.QHBoxLayout(); cr.addWidget(cap); cr.addWidget(delb)
         cv.addLayout(cr)
@@ -607,7 +614,7 @@ class Controller(QtWidgets.QMainWindow):
 
     def _add_scene(self):
         n = len(self.scenes)
-        self.scenes.append(_norm_scene({"name": f"씬 {n + 1}"}))
+        self.scenes.append(_norm_scene({"name": f"Scene {n + 1}"}))
         self._rebuild_scene_cols()
 
     def _del_scene(self, i: int):
@@ -621,7 +628,7 @@ class Controller(QtWidgets.QMainWindow):
     def _scene_btn_text(sc) -> str:
         """버튼 라벨 = 이름 + A/B 요약 (담기/편집 시 눈에 띄게 바뀜)."""
         def part(on, f, amp, tw):
-            return (f"{f:.1f}Hz·{amp}%" + ("↔" if tw else "")) if on else "off"
+            return (f"{f:.1f}Hz·{amp}°" + ("↔" if tw else "")) if on else "off"
         a = part(sc["a_on"], sc["a_freq"], sc["a_amp"], sc["a_twist"])
         b = part(sc["b_on"], sc["b_freq"], sc["b_amp"], sc["b_twist"])
         return f"{sc['name']}\nA {a}   B {b}   Δφ{sc['phase']}°"
@@ -645,7 +652,7 @@ class Controller(QtWidgets.QMainWindow):
             return
         sw = self.sw[i]
         self.scenes[i] = {
-            "name": sw["name"].text() or f"씬 {i + 1}",
+            "name": sw["name"].text() or f"Scene {i + 1}",
             "a_on": sw["a_on"].isChecked(), "a_freq": round(sw["a_freq"].value(), 1), "a_amp": sw["a_amp"].value(),
             "b_on": sw["b_on"].isChecked(), "b_freq": round(sw["b_freq"].value(), 1), "b_amp": sw["b_amp"].value(),
             "a_twist": sw["a_twist"].isChecked(), "b_twist": sw["b_twist"].isChecked(),
@@ -755,20 +762,20 @@ class Controller(QtWidgets.QMainWindow):
 
     def _poll_pad(self):
         if not _HAS_PYGAME:
-            self.pad_lbl.setText("PS5: pygame 없음")
+            self.pad_lbl.setText("PS5: no pygame")
             return
         try:
             pygame.event.pump()
             if self._js is None and pygame.joystick.get_count() > 0:
                 self._init_js()
             if self._js is None:
-                self.pad_lbl.setText("PS5: 미연결 (키보드 사용)")
+                self.pad_lbl.setText("PS5: not connected (use keyboard)")
                 return
             xb = bool(self._js.get_button(0))   # ✕ Cross = STOP
             ob = bool(self._js.get_button(1))   # ○ Circle = START
         except Exception:
             self._js = None
-            self.pad_lbl.setText("PS5: 미연결")
+            self.pad_lbl.setText("PS5: not connected")
             return
         tgts = self._input_targets()
         if xb and not self._xprev:
@@ -778,7 +785,7 @@ class Controller(QtWidgets.QMainWindow):
             for p in tgts:
                 p.start()
         self._xprev, self._oprev = xb, ob
-        self.pad_lbl.setText(f"PS5: {self._js_name[:16]}  대상 {self._active().name}")
+        self.pad_lbl.setText(f"PS5: {self._js_name[:16]}  target {self._active().name}")
 
     # ---------------------------------------------------------------- 60Hz
     def _tick(self):
@@ -813,8 +820,33 @@ class Controller(QtWidgets.QMainWindow):
             pass
 
 
+def _apply_dark(app):
+    """다크(나이트) 모드 — Fusion + 어두운 팔레트."""
+    app.setStyle("Fusion")
+    g = QtGui.QColor
+    p = QtGui.QPalette()
+    text = g(220, 220, 220)
+    p.setColor(QtGui.QPalette.Window, g(37, 37, 38))
+    p.setColor(QtGui.QPalette.WindowText, text)
+    p.setColor(QtGui.QPalette.Base, g(30, 30, 30))
+    p.setColor(QtGui.QPalette.AlternateBase, g(45, 45, 46))
+    p.setColor(QtGui.QPalette.Text, text)
+    p.setColor(QtGui.QPalette.Button, g(53, 53, 54))
+    p.setColor(QtGui.QPalette.ButtonText, text)
+    p.setColor(QtGui.QPalette.ToolTipBase, g(45, 45, 46))
+    p.setColor(QtGui.QPalette.ToolTipText, text)
+    p.setColor(QtGui.QPalette.Highlight, g(0x33, 0xcc, 0x88))
+    p.setColor(QtGui.QPalette.HighlightedText, g(0, 0, 0))
+    dim = g(120, 120, 120)
+    p.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, dim)
+    p.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText, dim)
+    p.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.WindowText, dim)
+    app.setPalette(p)
+
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    _apply_dark(app)
     # 글씨 1.5배 — 무대 현장 가독성 (2배는 너무 커서 공간 부족)
     f = app.font()
     base = f.pointSizeF() if f.pointSizeF() > 0 else 9.0
