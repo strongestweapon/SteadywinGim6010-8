@@ -55,6 +55,9 @@ class SystemPanel(QtWidgets.QGroupBox):
         super().__init__(f"시스템 {name}")
         self.name = name
         self._default_ip = default_ip
+        # 현재 반영 중인 씬 (제목에 표시). 수동 조작하면 dirty=수정 표시.
+        self.scene_label = ""
+        self.scene_dirty = False
         # 송신 상태
         self.running = False
         self.seq = 0
@@ -100,6 +103,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.speed_lbl = QtWidgets.QLabel("")
         g.addWidget(self.speed_lbl, r, 3)
         self.speed_slider.valueChanged.connect(self._labels)
+        self.speed_slider.sliderMoved.connect(self._user_touch)   # 사용자 드래그만 (씬 ramp 의 setValue 는 제외)
 
         r += 1
         g.addWidget(QtWidgets.QLabel("강도"), r, 0)
@@ -110,6 +114,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.angle_lbl = QtWidgets.QLabel("")
         g.addWidget(self.angle_lbl, r, 3)
         self.angle_slider.valueChanged.connect(self._labels)
+        self.angle_slider.sliderMoved.connect(self._user_touch)
 
         r += 1
         g.addWidget(QtWidgets.QLabel("극성반전"), r, 0)
@@ -117,6 +122,8 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.pol_m1 = QtWidgets.QCheckBox("모터1")
         self.pol_m2 = QtWidgets.QCheckBox("모터2")
         self.pol_m2.setChecked(True)   # node2 미러 장착 기본 반전
+        self.pol_m1.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 적용 setChecked 는 제외)
+        self.pol_m2.clicked.connect(self._user_touch)
         pol.addWidget(self.pol_m1)
         pol.addWidget(self.pol_m2)
         pol.addStretch(1)
@@ -125,10 +132,11 @@ class SystemPanel(QtWidgets.QGroupBox):
         g.addWidget(w, r, 1, 1, 3)
 
         r += 1
-        self.btn = QtWidgets.QPushButton("▶ START")
+        self.btn = QtWidgets.QPushButton("▶ 동작")
         self.btn.setCheckable(True)
         self.btn.setStyleSheet("font-weight:bold; padding:10px;")
         self.btn.toggled.connect(self._toggle)
+        self.btn.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 start/stop 의 setChecked 는 제외)
         g.addWidget(self.btn, r, 0, 1, 2)
         self.tare_btn = QtWidgets.QPushButton("IMU 0점")
         self.tare_btn.clicked.connect(lambda: setattr(self, "tare_ticks", 6))
@@ -161,7 +169,7 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     def _toggle(self, on: bool):
         self.running = on
-        self.btn.setText("■ STOP" if on else "▶ START")
+        self.btn.setText("■ 정지" if on else "▶ 동작")
         if on:
             self.pk_i = 0.0
             self.pk_vmin = 999.0
@@ -179,6 +187,25 @@ class SystemPanel(QtWidgets.QGroupBox):
     def stop(self):
         if self.btn.isChecked():
             self.btn.setChecked(False)
+
+    # ---- 현재 씬 표시 (제목) ----
+    def set_scene(self, name: str):
+        """이 패널이 반영 중인 씬 이름 설정 → 제목에 '적용중' 표시, 수정플래그 해제."""
+        self.scene_label = name
+        self.scene_dirty = False
+        self._update_title()
+
+    def _user_touch(self, *args):
+        """사용자가 슬라이더/버튼/극성을 직접 만짐 → 씬에서 벗어남(수정)."""
+        if self.scene_label and not self.scene_dirty:
+            self.scene_dirty = True
+            self._update_title()
+
+    def _update_title(self):
+        if self.scene_label:
+            self.setTitle(f"시스템 {self.name}  ({self.scene_label}{' *수정' if self.scene_dirty else ' 적용중'})")
+        else:
+            self.setTitle(f"시스템 {self.name}")
 
     def set_controls_enabled(self, en: bool):
         for w in (self.speed_slider, self.angle_slider, self.pol_m1,
@@ -682,6 +709,7 @@ class Controller(QtWidgets.QMainWindow):
         sc = self.scenes[idx]
         if self.link_cb.isChecked():
             self.link_cb.setChecked(False)   # 씬은 A/B 독립 → LINK 해제
+        self.A.set_scene(sc["name"]); self.B.set_scene(sc["name"])   # 제목에 '적용중' 표시
         # 극성 반전을 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
         self.A.pol_m1.setChecked(sc["a_pol1"]); self.A.pol_m2.setChecked(sc["a_pol2"])
         self.B.pol_m1.setChecked(sc["b_pol1"]); self.B.pol_m2.setChecked(sc["b_pol2"])
