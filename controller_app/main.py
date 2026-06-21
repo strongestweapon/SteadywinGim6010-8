@@ -21,8 +21,10 @@ from __future__ import annotations
 import sys
 import math
 import socket
+import time
+from collections import deque
 
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 import numpy as np
 import pyqtgraph as pg
 
@@ -60,6 +62,11 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.telem = None
         self.pk_i = 0.0
         self.pk_vmin = 999.0
+        # 실측 패킷손실 (ESP32→앱 텔레메트리 seq 간격으로 측정)
+        self._telem_last_seq = None
+        self._gap_window = deque(maxlen=90)   # 최근 ~3s (telem ≈30Hz)
+        self._telem_last_t = 0.0              # 마지막 수신 시각 [monotonic]
+        self.drop_meas = 0.0                  # 측정 손실율 [%]
         self.value = 0.0                  # 현재 명령값 [출력°] (그래프용)
         self.buf = np.zeros(PLOT_N)       # 파형 롤링 버퍼
         self._build()
@@ -120,7 +127,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         r += 1
         self.btn = QtWidgets.QPushButton("▶ START")
         self.btn.setCheckable(True)
-        self.btn.setStyleSheet("font-size:15px; padding:6px;")
+        self.btn.setStyleSheet("font-weight:bold; padding:10px;")
         self.btn.toggled.connect(self._toggle)
         g.addWidget(self.btn, r, 0, 1, 2)
         self.tare_btn = QtWidgets.QPushButton("IMU 0점")
@@ -129,7 +136,7 @@ class SystemPanel(QtWidgets.QGroupBox):
 
         r += 1
         self.status_lbl = QtWidgets.QLabel("정지")
-        self.status_lbl.setStyleSheet("font-family:monospace; font-size:12px;")
+        self.status_lbl.setStyleSheet("font-family:monospace;")
         self.status_lbl.setWordWrap(True)
         g.addWidget(self.status_lbl, r, 0, 1, 4)
 
@@ -159,6 +166,9 @@ class SystemPanel(QtWidgets.QGroupBox):
             self.pk_i = 0.0
             self.pk_vmin = 999.0
             self.manual_side = -1   # START 시 -측(스탠바이)
+            self._telem_last_seq = None   # 손실 측정 리셋
+            self._gap_window.clear()
+            self.drop_meas = 0.0
         else:
             self.phase = 0.0
 
@@ -249,6 +259,20 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.pk_i = max(self.pk_i, abs(t["m1_iq"]), abs(t["m2_iq"]))
         if 1.0 < t["vbus"] < self.pk_vmin:
             self.pk_vmin = t["vbus"]
+        # 실측 손실율: 연속 텔레메트리 seq 간격(gap). gap=1=무손실, gap=N → N-1개 유실.
+        self._telem_last_t = time.monotonic()
+        seq = t["seq"]
+        if self._telem_last_seq is not None:
+            gap = (seq - self._telem_last_seq) & 0xFFFF
+            if 1 <= gap <= 500:
+                self._gap_window.append(gap)
+            else:               # 재시작/큰 점프 → 윈도우 리셋
+                self._gap_window.clear()
+        self._telem_last_seq = seq
+        if self._gap_window:
+            total = sum(self._gap_window)        # 기대 패킷수
+            recv = len(self._gap_window)          # 실수신 패킷수
+            self.drop_meas = (total - recv) / total * 100.0
 
     def refresh_status(self):
         run = "RUN" if self.running else "정지"
@@ -260,6 +284,10 @@ class SystemPanel(QtWidgets.QGroupBox):
         if t is None:
             self.status_lbl.setText(f"{run}  (텔레메트리 대기)")
             return
+        # 신호 끊김 = 텔레메트리가 1초 이상 안 들어옴 → 실측 손실 100%
+        stale = (time.monotonic() - self._telem_last_t) > 1.0
+        drop = 100.0 if stale else self.drop_meas
+        dwarn = "  ⚠신호끊김" if stale else ""
         warn = ""
         if t["ibus"] > 3.0:
             warn = " ⚠과전류"
@@ -269,7 +297,8 @@ class SystemPanel(QtWidgets.QGroupBox):
         vmin = f"{self.pk_vmin:.1f}" if self.pk_vmin < 900 else "—"
         self.status_lbl.setText(
             f"{run}   I {t['m1_iq']:+.1f}/{t['m2_iq']:+.1f}A  V {t['vbus']:.1f}  "
-            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   pk: Imax {self.pk_i:.1f}A  Vmin {vmin}")
+            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   실drop {drop:.0f}%{dwarn}   "
+            f"pk: Imax {self.pk_i:.1f}A  Vmin {vmin}")
 
 
 def _rand100() -> int:
@@ -316,10 +345,10 @@ class Controller(QtWidgets.QMainWindow):
         self.link_cb = QtWidgets.QCheckBox("LINK 동기 (A=마스터, B 미러)")
         self.link_cb.toggled.connect(self._update_active_enabled)
         top.addWidget(self.link_cb)
-        top.addWidget(QtWidgets.QLabel("drop%"))
+        top.addWidget(QtWidgets.QLabel("drop 시뮬%"))
         self.drop_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.drop_slider.setRange(0, 90)
-        self.drop_slider.setMaximumWidth(80)
+        self.drop_slider.setMaximumWidth(120)
         top.addWidget(self.drop_slider)
         top.addStretch(1)
         self.pad_lbl = QtWidgets.QLabel("PS5: —")
@@ -339,7 +368,7 @@ class Controller(QtWidgets.QMainWindow):
         self.tgt_a.toggled.connect(self._refresh_highlight)
         # 무대 배치에 맞춰 왼쪽=B, 오른쪽=A 로 표시
         for radio, panel in ((self.tgt_b, self.B), (self.tgt_a, self.A)):
-            radio.setStyleSheet("font-weight:bold; font-size:13px;")
+            radio.setStyleSheet("font-weight:bold;")
             col = QtWidgets.QVBoxLayout()
             rrow = QtWidgets.QHBoxLayout()
             rrow.addStretch(1)
@@ -501,8 +530,13 @@ class Controller(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    # 글씨 2배 — 무대 현장에서 멀리서도 보이게 (시스템 기본 폰트의 2배)
+    f = app.font()
+    base = f.pointSizeF() if f.pointSizeF() > 0 else 9.0
+    f.setPointSizeF(base * 2.0)
+    app.setFont(f)
     win = Controller()
-    win.resize(1000, 380)
+    win.resize(1500, 820)
     win.show()
     sys.exit(app.exec())
 
