@@ -39,6 +39,7 @@ SEND_HZ = 60                  # 송신 주기
 PLOT_SECONDS = 4.0            # 파형 그래프 표시 구간
 PLOT_N = int(SEND_HZ * PLOT_SECONDS)
 PLOT_LIMIT_DEG = proto.AMP_DEG_MAX  # 그래프 Y 범위 기준 [출력°]
+CONN_TIMEOUT = 1.0            # 텔레메트리 이 시간 이상 무수신 = 통신두절 [s] (ESP32 COMM_TIMEOUT 0.5s 보다 여유)
 
 
 class SystemPanel(QtWidgets.QGroupBox):
@@ -60,8 +61,11 @@ class SystemPanel(QtWidgets.QGroupBox):
         # 실측 패킷손실 (ESP32→앱 텔레메트리 seq 간격으로 측정)
         self._telem_last_seq = None
         self._gap_window = deque(maxlen=90)   # 최근 ~3s (telem ≈30Hz)
-        self._telem_last_t = 0.0              # 마지막 수신 시각 [monotonic]
+        self._telem_last_t = 0.0              # 마지막 수신 시각 [monotonic] (0=한번도 못받음)
         self.drop_meas = 0.0                  # 측정 손실율 [%]
+        self.active = False                   # 제어 대상 강조(초록) 여부 — Controller 가 설정
+        self._style_key = None                # 테두리 스타일 변경 감지용
+        self._status_red = None               # 상태라벨 빨강 여부 변경 감지용
         self.value = 0.0                  # 현재 명령값 [출력°] (그래프용)
         self.buf = np.zeros(PLOT_N)       # 파형 롤링 버퍼
         self._build()
@@ -235,16 +239,46 @@ class SystemPanel(QtWidgets.QGroupBox):
             recv = len(self._gap_window)          # 실수신 패킷수
             self.drop_meas = (total - recv) / total * 100.0
 
+    def conn_status(self) -> str:
+        """'never'(한번도 못받음) | 'stale'(끊김) | 'ok'."""
+        if self._telem_last_t == 0.0:
+            return "never"
+        if (time.monotonic() - self._telem_last_t) > CONN_TIMEOUT:
+            return "stale"
+        return "ok"
+
+    def update_style(self):
+        """테두리 색 = 통신두절(빨강) > 제어대상(초록) > 비활성(회색). 변경 시에만 적용."""
+        disc = self.conn_status() != "ok"
+        key = "disc" if disc else ("act" if self.active else "idle")
+        if key == self._style_key:
+            return
+        self._style_key = key
+        if key == "disc":
+            w, c, title = 3, "#ff4444", "#ff5555"      # 빨강 = 통신두절
+        elif key == "act":
+            w, c, title = 2, "#33cc88", "#33cc88"      # 초록 = 제어 대상
+        else:
+            w, c, title = 1, "#555", "#888"            # 회색 = 비활성
+        self.setStyleSheet(
+            f"QGroupBox{{border:{w}px solid {c}; border-radius:6px; margin-top:8px;}}"
+            f"QGroupBox::title{{subcontrol-origin:margin; left:10px; color:{title}; font-weight:bold;}}")
+
     def refresh_status(self):
         run = "RUN" if self.running else "정지"
-        t = self.telem
-        if t is None:
-            self.status_lbl.setText(f"{run}  (텔레메트리 대기)")
+        state = self.conn_status()
+        if state != "ok":
+            # 통신두절 = drop 의 완전손실 상태. 처음 시작 때 응답없어도 여기로.
+            if self._status_red is not True:
+                self.status_lbl.setStyleSheet("font-family:monospace; color:#ff5555; font-weight:bold;")
+                self._status_red = True
+            msg = "응답없음 — ESP32/IP/전원 확인" if state == "never" else "신호끊김"
+            self.status_lbl.setText(f"{run}   ⛔ 통신두절 ({msg})")
             return
-        # 신호 끊김 = 텔레메트리가 1초 이상 안 들어옴 → 실측 손실 100%
-        stale = (time.monotonic() - self._telem_last_t) > 1.0
-        drop = 100.0 if stale else self.drop_meas
-        dwarn = "  ⚠신호끊김" if stale else ""
+        if self._status_red is not False:
+            self.status_lbl.setStyleSheet("font-family:monospace;")
+            self._status_red = False
+        t = self.telem
         warn = ""
         if t["ibus"] > 3.0:
             warn = " ⚠과전류"
@@ -254,7 +288,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         vmin = f"{self.pk_vmin:.1f}" if self.pk_vmin < 900 else "—"
         self.status_lbl.setText(
             f"{run}   I {t['m1_iq']:+.1f}/{t['m2_iq']:+.1f}A  V {t['vbus']:.1f}  "
-            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   실drop {drop:.0f}%{dwarn}   "
+            f"Ibus {t['ibus']:.2f}A{warn}\n{imu}   실drop {self.drop_meas:.0f}%   "
             f"pk: Imax {self.pk_i:.1f}A  Vmin {vmin}")
 
 
@@ -348,21 +382,12 @@ class Controller(QtWidgets.QMainWindow):
         self._refresh_highlight()
 
     def _refresh_highlight(self):
-        """제어 중인 패널을 초록 테두리로. LINK 면 A 가 둘 다 제어 → 둘 다 강조."""
+        """제어 대상 강조. 통신두절(빨강)은 패널 update_style 이 우선 처리."""
         linked = self.link_cb.isChecked()
-        self._set_active_style(self.A, linked or self.tgt_a.isChecked())
-        self._set_active_style(self.B, linked or self.tgt_b.isChecked())
-
-    @staticmethod
-    def _set_active_style(panel, active: bool):
-        if active:
-            panel.setStyleSheet(
-                "QGroupBox{border:2px solid #33cc88; border-radius:6px; margin-top:8px;}"
-                "QGroupBox::title{subcontrol-origin:margin; left:10px; color:#33cc88; font-weight:bold;}")
-        else:
-            panel.setStyleSheet(
-                "QGroupBox{border:1px solid #555; border-radius:6px; margin-top:8px;}"
-                "QGroupBox::title{subcontrol-origin:margin; left:10px; color:#888;}")
+        self.A.active = linked or self.tgt_a.isChecked()
+        self.B.active = linked or self.tgt_b.isChecked()
+        self.A.update_style()
+        self.B.update_style()
 
     def _active(self) -> SystemPanel:
         return self.A if self.tgt_a.isChecked() else self.B
@@ -434,6 +459,8 @@ class Controller(QtWidgets.QMainWindow):
         self._recv_telem()
         self.A.refresh_status()
         self.B.refresh_status()
+        self.A.update_style()   # 통신두절↔복구 시 테두리 색 라이브 갱신 (변경 시에만 적용)
+        self.B.update_style()
 
     def _mirror(self, a: SystemPanel, b: SystemPanel):
         """LINK: A → B 미러 (IP/Port 제외한 제어값 — 속도/강도/극성/run)."""
