@@ -478,7 +478,7 @@ class OscBridge(QtCore.QObject):
     def _on_arg(self, address, *args):
         if args:
             try:
-                self.trigger.emit(int(args[0]) - 1)
+                self.trigger.emit(int(float(args[0])) - 1)   # int/float/숫자문자열 다 허용
             except (ValueError, TypeError):
                 pass
 
@@ -599,6 +599,11 @@ class Controller(QtWidgets.QMainWindow):
         bot.addWidget(self.crossfade_spin)
         bot.addSpacing(20)
         self.osc_cb = QtWidgets.QCheckBox("OSC in")
+        self.osc_cb.setToolTip(
+            "Trigger a scene by sending OSC (no argument needed):\n"
+            "  /sw/scene/1   /sw/scene/2   /sw/scene/3 ...\n"
+            "Or address /sw/scene with one number arg (int or float):\n"
+            "  /sw/scene  2     /sw/scene  2.0")
         self.osc_cb.toggled.connect(self._toggle_osc)
         bot.addWidget(self.osc_cb)
         bot.addWidget(QtWidgets.QLabel("port"))
