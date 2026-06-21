@@ -18,6 +18,8 @@ ESP32 **2대**(각각 모터쌍 1조)를 한 앱에서 제어. 좌우 2패널 + 
 """
 from __future__ import annotations
 import sys
+import os
+import json
 import math
 import socket
 import time
@@ -40,6 +42,10 @@ PLOT_SECONDS = 4.0            # 파형 그래프 표시 구간
 PLOT_N = int(SEND_HZ * PLOT_SECONDS)
 PLOT_LIMIT_DEG = proto.AMP_DEG_MAX  # 그래프 Y 범위 기준 [출력°]
 CONN_TIMEOUT = 1.0            # 텔레메트리 이 시간 이상 무수신 = 통신두절 [s] (ESP32 COMM_TIMEOUT 0.5s 보다 여유)
+TWO_PI = 2.0 * math.pi
+SCENE_COUNT = 5              # 공연 씬(버튼) 개수
+CROSSFADE_S = 1.5            # 씬 전환 크로스페이드 기본 시간 [s] (freq/amp 부드럽게 이어받기)
+SHOWS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shows", "show.json")
 
 
 class SystemPanel(QtWidgets.QGroupBox):
@@ -66,6 +72,9 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.active = False                   # 제어 대상 강조(초록) 여부 — Controller 가 설정
         self._style_key = None                # 테두리 스타일 변경 감지용
         self._status_red = None               # 상태라벨 빨강 여부 변경 감지용
+        # 씬 전환(크로스페이드) 상태
+        self._tr = None                       # 진행 중 ramp: dict(sp0,sp1,an0,an1,on,i,n) | None
+        self._deferred = False                # 스태거드 스타트 대기(위상차) — trigger_start 까지 보류
         self.value = 0.0                  # 현재 명령값 [출력°] (그래프용)
         self.buf = np.zeros(PLOT_N)       # 파형 롤링 버퍼
         self._build()
@@ -156,6 +165,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         if on:
             self.pk_i = 0.0
             self.pk_vmin = 999.0
+            self.phase = 0.0              # 앱 위상모델 0 으로 리셋 (펌웨어 g_phase=0 at start 와 정합 → 위상차 계산 기준)
             self._telem_last_seq = None   # 손실 측정 리셋
             self._gap_window.clear()
             self.drop_meas = 0.0
@@ -174,6 +184,55 @@ class SystemPanel(QtWidgets.QGroupBox):
         for w in (self.speed_slider, self.angle_slider, self.pol_m1,
                   self.pol_m2, self.btn, self.tare_btn):
             w.setEnabled(en)
+
+    # ---------------------------------------------------------------- 씬 전환
+    def begin_transition(self, speed_units: int, angle_pct: int, on: bool,
+                         n_steps: int, defer_start: bool = False):
+        """씬 적용: 슬라이더(속도/강도)를 목표로 n_steps 동안 램프(=부드러운 이어받기).
+        on=False 면 강도 0 으로 페이드 후 정지. defer_start=True 면 START 를 보류
+        (위상차 스태거드 스타트용 — Controller 가 적절한 시점에 trigger_start)."""
+        if not on:
+            angle_pct = 0                       # 끄는 씬: 진폭 0 으로 페이드
+        fade_in = on and (not self.running)     # 정지→동작: 0 에서 페이드인
+        if fade_in:
+            # amp 0 에서 출발 → freq 는 즉시 목표로(무동작이라 점프 무방), 진폭만 페이드.
+            # (freq 까지 램프하면 A·B 페이드 구간 freq 가 달라 위상차가 어긋남)
+            self.speed_slider.setValue(int(speed_units))
+            self.angle_slider.setValue(0)
+            sp0, an0 = int(speed_units), 0
+        else:
+            sp0, an0 = self.speed_slider.value(), self.angle_slider.value()
+        self._tr = {
+            "sp0": sp0, "sp1": int(speed_units),
+            "an0": an0, "an1": int(angle_pct),
+            "on": on, "i": 0, "n": max(1, n_steps),
+        }
+        self._deferred = bool(defer_start and fade_in)
+        if fade_in and not self._deferred:
+            self.start()
+
+    def trigger_start(self):
+        """스태거드 스타트 보류 해제 → 지금부터 START + 페이드인."""
+        if self._deferred:
+            self._deferred = False
+            self.start()
+
+    def step_transition(self):
+        """매 틱 호출. 보류 중이면 대기, 아니면 슬라이더를 목표로 한 스텝 이동."""
+        if self._tr is None or self._deferred:
+            return
+        tr = self._tr
+        tr["i"] += 1
+        f = tr["i"] / tr["n"]
+        if f >= 1.0:
+            self.speed_slider.setValue(tr["sp1"])
+            self.angle_slider.setValue(tr["an1"])
+            if not tr["on"] and self.running:
+                self.stop()
+            self._tr = None
+            return
+        self.speed_slider.setValue(int(round(tr["sp0"] + (tr["sp1"] - tr["sp0"]) * f)))
+        self.angle_slider.setValue(int(round(tr["an0"] + (tr["an1"] - tr["an0"]) * f)))
 
     def _labels(self):
         freq = self.speed_slider.value() / 10.0
@@ -298,6 +357,27 @@ def _rand100() -> int:
     return random.randint(0, 99)
 
 
+def _default_scenes():
+    """기본 5씬: 동상 / 역상(180°) / A만 / B만 / 정지."""
+    return [
+        {"name": "씬 1 동상",  "a_on": True,  "a_freq": 0.4, "a_amp": 60, "b_on": True,  "b_freq": 0.4, "b_amp": 60, "phase": 0},
+        {"name": "씬 2 역상",  "a_on": True,  "a_freq": 0.4, "a_amp": 60, "b_on": True,  "b_freq": 0.4, "b_amp": 60, "phase": 180},
+        {"name": "씬 3 A만",   "a_on": True,  "a_freq": 1.0, "a_amp": 40, "b_on": False, "b_freq": 1.0, "b_amp": 40, "phase": 0},
+        {"name": "씬 4 B만",   "a_on": False, "a_freq": 1.0, "a_amp": 40, "b_on": True,  "b_freq": 1.0, "b_amp": 40, "phase": 0},
+        {"name": "씬 5 정지",  "a_on": False, "a_freq": 0.4, "a_amp": 0,  "b_on": False, "b_freq": 0.4, "b_amp": 0,  "phase": 0},
+    ]
+
+
+def _phase_crossed(prev: float, cur: float, target: float) -> bool:
+    """전진 방향으로 prev→cur 사이에 target 위상을 통과했나 (모두 mod 2π, 하한 포함)."""
+    p = prev % TWO_PI
+    c = cur % TWO_PI
+    t = target % TWO_PI
+    if c >= p:
+        return p <= t <= c
+    return t >= p or t <= c   # wrap 구간
+
+
 class Controller(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -316,7 +396,16 @@ class Controller(QtWidgets.QMainWindow):
             pygame.joystick.init()
             self._init_js()
 
+        # 공연 씬
+        self.scenes = _default_scenes()
+        self._pending_start = None     # 스태거드 스타트 대기: dict(panel, ref, target, prev)
+
         self._build()
+        data = self._read_shows_file()  # 저장된 쇼파일 있으면 덮어쓰기
+        if data:
+            self.scenes = data
+            self._refresh_scene_ui()
+            self._load_editor()
 
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(int(1000 / SEND_HZ))
@@ -373,7 +462,193 @@ class Controller(QtWidgets.QMainWindow):
         hint.setStyleSheet("color:#888;")
         root.addWidget(hint)
 
+        root.addWidget(self._build_show())   # 공연(씬) 섹션 — 화면 아래
+
         self._update_active_enabled()
+
+    # ---------------------------------------------------------------- 공연(씬) UI
+    def _build_show(self):
+        box = QtWidgets.QGroupBox("공연 (씬) — 버튼 누르면 그 씬으로 부드럽게 전환")
+        v = QtWidgets.QVBoxLayout(box)
+
+        # 씬 버튼 줄
+        row = QtWidgets.QHBoxLayout()
+        self.scene_btns = []
+        for i in range(SCENE_COUNT):
+            b = QtWidgets.QPushButton()
+            b.setMinimumHeight(96)
+            b.setStyleSheet("text-align:left; padding:6px; font-weight:bold;")
+            b.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
+            row.addWidget(b)
+            self.scene_btns.append(b)
+        v.addLayout(row)
+
+        # 편집 영역
+        self._edit_block = False
+        eg = QtWidgets.QGridLayout()
+        eg.addWidget(QtWidgets.QLabel("편집"), 0, 0)
+        self.edit_combo = QtWidgets.QComboBox()
+        for i in range(SCENE_COUNT):
+            self.edit_combo.addItem(f"씬 {i + 1}")
+        self.edit_combo.currentIndexChanged.connect(self._load_editor)
+        eg.addWidget(self.edit_combo, 0, 1)
+        eg.addWidget(QtWidgets.QLabel("이름"), 0, 2)
+        self.e_name = QtWidgets.QLineEdit()
+        eg.addWidget(self.e_name, 0, 3, 1, 2)
+
+        self.e_a_on = QtWidgets.QCheckBox("A 켜기")
+        self.e_a_freq = QtWidgets.QDoubleSpinBox()
+        self.e_a_freq.setRange(0.1, proto.FREQ_MAX); self.e_a_freq.setSingleStep(0.1); self.e_a_freq.setSuffix(" Hz")
+        self.e_a_amp = QtWidgets.QSpinBox(); self.e_a_amp.setRange(0, 100); self.e_a_amp.setSuffix(" %")
+        eg.addWidget(self.e_a_on, 1, 0)
+        eg.addWidget(QtWidgets.QLabel("A 주파수"), 1, 1); eg.addWidget(self.e_a_freq, 1, 2)
+        eg.addWidget(QtWidgets.QLabel("A 진폭"), 1, 3); eg.addWidget(self.e_a_amp, 1, 4)
+
+        self.e_b_on = QtWidgets.QCheckBox("B 켜기")
+        self.e_b_freq = QtWidgets.QDoubleSpinBox()
+        self.e_b_freq.setRange(0.1, proto.FREQ_MAX); self.e_b_freq.setSingleStep(0.1); self.e_b_freq.setSuffix(" Hz")
+        self.e_b_amp = QtWidgets.QSpinBox(); self.e_b_amp.setRange(0, 100); self.e_b_amp.setSuffix(" %")
+        eg.addWidget(self.e_b_on, 2, 0)
+        eg.addWidget(QtWidgets.QLabel("B 주파수"), 2, 1); eg.addWidget(self.e_b_freq, 2, 2)
+        eg.addWidget(QtWidgets.QLabel("B 진폭"), 2, 3); eg.addWidget(self.e_b_amp, 2, 4)
+
+        self.e_phase = QtWidgets.QSpinBox(); self.e_phase.setRange(0, 359); self.e_phase.setSuffix("°")
+        eg.addWidget(QtWidgets.QLabel("A↔B 위상차"), 3, 1); eg.addWidget(self.e_phase, 3, 2)
+        v.addLayout(eg)
+
+        # 하단: 캡처 / 전환시간 / 저장·불러오기
+        bot = QtWidgets.QHBoxLayout()
+        cap = QtWidgets.QPushButton("현재 패널값 → 이 씬")
+        cap.clicked.connect(self._capture_scene)
+        bot.addWidget(cap)
+        bot.addWidget(QtWidgets.QLabel("전환시간"))
+        self.crossfade_spin = QtWidgets.QDoubleSpinBox()
+        self.crossfade_spin.setRange(0.0, 5.0); self.crossfade_spin.setSingleStep(0.1)
+        self.crossfade_spin.setValue(CROSSFADE_S); self.crossfade_spin.setSuffix(" s")
+        bot.addWidget(self.crossfade_spin)
+        bot.addStretch(1)
+        sv = QtWidgets.QPushButton("저장"); sv.clicked.connect(self._save_shows)
+        ld = QtWidgets.QPushButton("불러오기"); ld.clicked.connect(self._load_shows)
+        bot.addWidget(sv); bot.addWidget(ld)
+        v.addLayout(bot)
+
+        note = QtWidgets.QLabel(
+            "위상차 = 스태거드 스타트(B가 켜질 때 A 위상에 맞춰 시작). "
+            "둘 다 켜진 채 위상만 바꾸려면 그 씬에서 B를 한 번 재시작(STOP 후 적용).")
+        note.setStyleSheet("color:#888;"); note.setWordWrap(True)
+        v.addWidget(note)
+
+        # 편집 필드 변경 → 씬에 즉시 반영
+        self.e_name.textChanged.connect(self._editor_to_scene)
+        for w in (self.e_a_freq, self.e_a_amp, self.e_b_freq, self.e_b_amp, self.e_phase):
+            w.valueChanged.connect(self._editor_to_scene)
+        for w in (self.e_a_on, self.e_b_on):
+            w.toggled.connect(self._editor_to_scene)
+
+        self._refresh_scene_ui()
+        self._load_editor()
+        return box
+
+    # ---- 씬 데이터 ↔ UI ----
+    def _scene_summary(self, sc) -> str:
+        a = f"A {sc['a_freq']:.1f}Hz {sc['a_amp']}%" if sc["a_on"] else "A 끔"
+        b = f"B {sc['b_freq']:.1f}Hz {sc['b_amp']}%" if sc["b_on"] else "B 끔"
+        return f"{sc['name']}\n{a}\n{b}\nΔφ {sc['phase']}°"
+
+    def _refresh_scene_ui(self):
+        for i, b in enumerate(self.scene_btns):
+            b.setText(self._scene_summary(self.scenes[i]))
+
+    def _load_editor(self):
+        sc = self.scenes[self.edit_combo.currentIndex()]
+        self._edit_block = True
+        self.e_name.setText(sc["name"])
+        self.e_a_on.setChecked(sc["a_on"]); self.e_a_freq.setValue(sc["a_freq"]); self.e_a_amp.setValue(sc["a_amp"])
+        self.e_b_on.setChecked(sc["b_on"]); self.e_b_freq.setValue(sc["b_freq"]); self.e_b_amp.setValue(sc["b_amp"])
+        self.e_phase.setValue(sc["phase"])
+        self._edit_block = False
+
+    def _editor_to_scene(self):
+        if self._edit_block:
+            return
+        i = self.edit_combo.currentIndex()
+        self.scenes[i] = {
+            "name": self.e_name.text() or f"씬 {i + 1}",
+            "a_on": self.e_a_on.isChecked(), "a_freq": round(self.e_a_freq.value(), 1), "a_amp": self.e_a_amp.value(),
+            "b_on": self.e_b_on.isChecked(), "b_freq": round(self.e_b_freq.value(), 1), "b_amp": self.e_b_amp.value(),
+            "phase": self.e_phase.value(),
+        }
+        self.scene_btns[i].setText(self._scene_summary(self.scenes[i]))
+
+    def _capture_scene(self):
+        """현재 두 패널의 슬라이더/동작상태를 편집 중인 씬으로 저장."""
+        i = self.edit_combo.currentIndex()
+        self.scenes[i] = {
+            "name": self.scenes[i]["name"],
+            "a_on": self.A.running, "a_freq": round(self.A.speed_slider.value() / 10.0, 1), "a_amp": self.A.angle_slider.value(),
+            "b_on": self.B.running, "b_freq": round(self.B.speed_slider.value() / 10.0, 1), "b_amp": self.B.angle_slider.value(),
+            "phase": self.e_phase.value(),
+        }
+        self._load_editor()
+        self.scene_btns[i].setText(self._scene_summary(self.scenes[i]))
+
+    # ---- 쇼파일 저장/불러오기 ----
+    def _read_shows_file(self):
+        try:
+            with open(SHOWS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) == SCENE_COUNT:
+                return data
+        except (OSError, ValueError):
+            pass
+        return None
+
+    def _save_shows(self):
+        try:
+            os.makedirs(os.path.dirname(SHOWS_FILE), exist_ok=True)
+            with open(SHOWS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.scenes, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _load_shows(self):
+        data = self._read_shows_file()
+        if data:
+            self.scenes = data
+            self._refresh_scene_ui()
+            self._load_editor()
+
+    # ---- 씬 적용 + 스태거드 스타트 엔진 ----
+    def _apply_scene(self, idx: int):
+        sc = self.scenes[idx]
+        if self.link_cb.isChecked():
+            self.link_cb.setChecked(False)   # 씬은 A/B 독립 → LINK 해제
+        n = max(1, int(self.crossfade_spin.value() * SEND_HZ))
+        a_speed = max(1, round(sc["a_freq"] * 10))
+        b_speed = max(1, round(sc["b_freq"] * 10))
+        self._pending_start = None
+        both_on = sc["a_on"] and sc["b_on"]
+        # A = 위상 기준. 바로 적용.
+        self.A.begin_transition(a_speed, sc["a_amp"], sc["a_on"], n, defer_start=False)
+        # B = 둘 다 켜는 씬에서 B가 새로 켜질 때만 위상차만큼 스태거.
+        defer_b = both_on and (not self.B.running)
+        self.B.begin_transition(b_speed, sc["b_amp"], sc["b_on"], n, defer_start=defer_b)
+        if defer_b:
+            target = math.radians(sc["phase"]) % TWO_PI
+            self._pending_start = {"panel": self.B, "ref": self.A, "target": target, "prev": self.A.phase}
+
+    def _show_step(self):
+        """매 틱: 스태거드 스타트 대기 확인 + 두 패널 ramp 진행."""
+        p = self._pending_start
+        if p is not None and p["ref"].running:
+            cur = p["ref"].phase
+            if _phase_crossed(p["prev"], cur, p["target"]):
+                p["panel"].trigger_start()
+                self._pending_start = None
+            else:
+                p["prev"] = cur
+        self.A.step_transition()
+        self.B.step_transition()
 
     def _update_active_enabled(self):
         linked = self.link_cb.isChecked()
@@ -452,6 +727,8 @@ class Controller(QtWidgets.QMainWindow):
             self.B.set_controls_enabled(False)
         else:
             self.B.set_controls_enabled(True)
+
+        self._show_step()      # 씬 전환 ramp + 스태거드 스타트 (슬라이더를 목표로 이동)
 
         self.A.tick(dt, drop, self.sock)
         self.B.tick(dt, drop, self.sock)
