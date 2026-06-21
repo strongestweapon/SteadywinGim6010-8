@@ -4,16 +4,15 @@ main.py — 듀얼 ESP32 모터 컨트롤러 데스크탑 앱 (PySide6)
 ESP32 **2대**(각각 모터쌍 1조)를 한 앱에서 제어. 좌우 2패널 + LINK(동기) 토글.
 
 레이아웃:
-  - 상단(공유): LINK 토글 / 파형(사인·수동) / drop(패킷손실 시뮬) / PS5 상태·대상
-  - 좌/우 패널: IP·포트 / 속도 / 강도(=수동 최대각) / 극성 / START·STOP / IMU 0점 / 상태
-  - LINK ON  : A 가 마스터 → B 가 A 를 미러(컨트롤 비활성). PS5·키보드는 A 에 적용(둘 다 움직임).
-  - LINK OFF : 각 패널 독립. PS5·키보드는 "대상"으로 고른 패널만.
+  - 상단(공유): LINK 토글 / drop 시뮬 / PS5 상태·대상
+  - 좌/우 패널: IP·포트 / 속도(Hz) / 강도(진폭%) / 극성 / START·STOP / IMU 0점 / 상태
+  - LINK ON  : A 가 마스터 → B 가 A 를 미러(컨트롤 비활성). PS5 는 A 에 적용(둘 다 움직임).
+  - LINK OFF : 각 패널 독립. PS5 는 "대상"으로 고른 패널만.
 
 전송: 소켓 1개로 두 IP 에 각각 UDP 송신. 텔레메트리는 발신 IP 로 구분 수신.
 조작:
   - 사인 : 속도=주파수(Hz), 강도=진폭%
-  - 수동 : 속도=슬루(turn/s), 강도=토글 최대각(0~90°). Space/←/→ = -측↔+측 토글(스탠바이 -측).
-  - PS5  : ○=START, ✕=STOP, 왼쪽 스틱 좌우=측 직접지정. (LINK 따라 둘다/선택 패널)
+  - PS5  : ○=START, ✕=STOP. (LINK 따라 둘다/선택 패널)
 
 실행: python main.py   (ESP32 없이도 송신만 동작)
 """
@@ -39,9 +38,7 @@ import protocol as proto
 SEND_HZ = 60                  # 송신 주기
 PLOT_SECONDS = 4.0            # 파형 그래프 표시 구간
 PLOT_N = int(SEND_HZ * PLOT_SECONDS)
-MANUAL_LIMIT_DEG = 90.0       # 수동 ±한계 [출력°] (ESP32 HARD_LIMIT_TURN 과 동일)
-MANUAL_SPEED_TS = 10.0        # 수동 최대 슬루 속도 [turn/s] (속도 슬라이더 최대). ESP32 MANUAL_SPEED_MAX 와 동일
-JS_DEADZONE = 0.12            # PS5 스틱 데드존
+PLOT_LIMIT_DEG = proto.AMP_DEG_MAX  # 그래프 Y 범위 기준 [출력°]
 
 
 class SystemPanel(QtWidgets.QGroupBox):
@@ -55,8 +52,6 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.running = False
         self.seq = 0
         self.phase = 0.0          # 사인 위상 [rad]
-        self.manual_side = -1     # 수동 토글: -1=-측(스탠바이), +1=+측
-        self.manual_right = False
         self.tare_ticks = 0
         # 수신/표시 상태
         self.telem = None
@@ -75,14 +70,6 @@ class SystemPanel(QtWidgets.QGroupBox):
     def _build(self):
         g = QtWidgets.QGridLayout(self)
         r = 0
-        g.addWidget(QtWidgets.QLabel("파형"), r, 0)
-        self.wave_combo = QtWidgets.QComboBox()
-        self.wave_combo.addItem("사인 (ripple/진동)", proto.WAVE_SINE)
-        self.wave_combo.addItem("수동 스윙 (Space/←/→ 토글)", proto.WAVE_MANUAL)
-        self.wave_combo.currentIndexChanged.connect(self._labels)
-        g.addWidget(self.wave_combo, r, 1, 1, 3)
-
-        r += 1
         g.addWidget(QtWidgets.QLabel("IP"), r, 0)
         self.ip_edit = QtWidgets.QLineEdit(self._default_ip)
         g.addWidget(self.ip_edit, r, 1)
@@ -102,7 +89,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.speed_slider.valueChanged.connect(self._labels)
 
         r += 1
-        g.addWidget(QtWidgets.QLabel("강도/각도"), r, 0)
+        g.addWidget(QtWidgets.QLabel("강도"), r, 0)
         self.angle_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.angle_slider.setRange(0, 100)
         self.angle_slider.setValue(60)
@@ -143,7 +130,7 @@ class SystemPanel(QtWidgets.QGroupBox):
         r += 1
         self.plot = pg.PlotWidget()
         self.plot.setMinimumHeight(140)
-        self.plot.setYRange(-MANUAL_LIMIT_DEG * 1.1, MANUAL_LIMIT_DEG * 1.1)
+        self.plot.setYRange(-PLOT_LIMIT_DEG * 1.1, PLOT_LIMIT_DEG * 1.1)
         self.plot.setLabel("left", "명령", units="deg")
         self.plot.setLabel("bottom", "시간", units="s")
         self.plot.showGrid(x=True, y=True, alpha=0.3)
@@ -165,7 +152,6 @@ class SystemPanel(QtWidgets.QGroupBox):
         if on:
             self.pk_i = 0.0
             self.pk_vmin = 999.0
-            self.manual_side = -1   # START 시 -측(스탠바이)
             self._telem_last_seq = None   # 손실 측정 리셋
             self._gap_window.clear()
             self.drop_meas = 0.0
@@ -180,53 +166,30 @@ class SystemPanel(QtWidgets.QGroupBox):
         if self.btn.isChecked():
             self.btn.setChecked(False)
 
-    def toggle_manual(self):
-        self.manual_side = -self.manual_side
-
     def set_controls_enabled(self, en: bool):
-        for w in (self.wave_combo, self.speed_slider, self.angle_slider, self.pol_m1,
+        for w in (self.speed_slider, self.angle_slider, self.pol_m1,
                   self.pol_m2, self.btn, self.tare_btn):
             w.setEnabled(en)
 
-    def wave(self) -> int:
-        return self.wave_combo.currentData()
-
     def _labels(self):
-        wave = self.wave_combo.currentData()
         freq = self.speed_slider.value() / 10.0
         drive = self.angle_slider.value()
-        if wave == proto.WAVE_MANUAL:
-            self.speed_lbl.setText(f"{freq / proto.FREQ_MAX * MANUAL_SPEED_TS:.1f} t/s")
-            self.angle_lbl.setText(f"±{drive / 100.0 * MANUAL_LIMIT_DEG:.0f}°")
-        else:
-            self.speed_lbl.setText(f"{freq:.1f} Hz")
-            self.angle_lbl.setText(f"±{drive / 100.0 * proto.amp_deg_max(freq, 1.0):.0f}°")
+        self.speed_lbl.setText(f"{freq:.1f} Hz")
+        self.angle_lbl.setText(f"±{drive / 100.0 * proto.amp_deg_max(freq, 1.0):.0f}°")
 
     # ---------------------------------------------------------------- 송신
     def tick(self, dt: float, drop_pct: int, sock: socket.socket):
-        wave = self.wave_combo.currentData()
         freq = self.speed_slider.value() / 10.0
         drive = self.angle_slider.value()
-        self.manual_right = False
 
-        if wave == proto.WAVE_MANUAL:
-            amp_max = drive / 100.0 * MANUAL_LIMIT_DEG   # 강도 = 최대각 0~90°
-            amp_deg = amp_max                            # 송신=크기(부호는 BTN_RIGHT)
-            send_freq = freq / proto.FREQ_MAX * MANUAL_SPEED_TS
-            send_phase = 0.0
-            self.manual_right = (self.manual_side > 0)
-            self.value = (self.manual_side * amp_max) if self.running else 0.0
+        amp_deg = drive / 100.0 * proto.amp_deg_max(freq, 1.0)
+        if self.running:
+            self.phase += 2.0 * math.pi * freq * dt
+            if self.phase > 2.0 * math.pi:
+                self.phase -= 2.0 * math.pi
+            self.value = amp_deg * math.sin(self.phase)
         else:
-            amp_deg = drive / 100.0 * proto.amp_deg_max(freq, 1.0)
-            if self.running:
-                self.phase += 2.0 * math.pi * freq * dt
-                if self.phase > 2.0 * math.pi:
-                    self.phase -= 2.0 * math.pi
-                self.value = amp_deg * math.sin(self.phase)
-            else:
-                self.value = 0.0
-            send_freq = freq
-            send_phase = self.phase
+            self.value = 0.0
 
         # 파형 그래프 갱신 (명령값)
         self.buf = np.roll(self.buf, -1)
@@ -244,10 +207,8 @@ class SystemPanel(QtWidgets.QGroupBox):
         if self.tare_ticks > 0:
             flags |= proto.REQ_TARE
             self.tare_ticks -= 1
-        if self.manual_right:
-            flags |= proto.BTN_RIGHT
         pkt = proto.pack(self.seq, 1 if self.running else 0,
-                         send_freq, amp_deg, send_phase, waveform=wave, flags=flags)
+                         freq, amp_deg, self.phase, waveform=proto.WAVE_SINE, flags=flags)
         try:
             sock.sendto(pkt, (self.ip(), int(self.port_edit.text())))
         except (OSError, ValueError):
@@ -276,10 +237,6 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     def refresh_status(self):
         run = "RUN" if self.running else "정지"
-        if self.manual_right:
-            run += " +측"
-        elif self.running:
-            run += " -측"
         t = self.telem
         if t is None:
             self.status_lbl.setText(f"{run}  (텔레메트리 대기)")
@@ -320,14 +277,12 @@ class Controller(QtWidgets.QMainWindow):
         self._js_name = ""
         self._xprev = False
         self._oprev = False
-        self._sqprev = False   # □ Square 직전 상태 (rising-edge=방향 토글)
         if _HAS_PYGAME:
             pygame.init()
             pygame.joystick.init()
             self._init_js()
 
         self._build()
-        QtWidgets.QApplication.instance().installEventFilter(self)
 
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(int(1000 / SEND_HZ))
@@ -380,8 +335,7 @@ class Controller(QtWidgets.QMainWindow):
         root.addLayout(panels)
 
         hint = QtWidgets.QLabel(
-            "수동: Space/←/→ = -측↔+측 토글 (스탠바이 -측).  PS5: ○=START ✕=STOP 왼쪽스틱=측.  "
-            "LINK 켜면 A가 둘 다 제어.")
+            "PS5: ○=START ✕=STOP.  LINK 켜면 A가 둘 다 제어.")
         hint.setStyleSheet("color:#888;")
         root.addWidget(hint)
 
@@ -414,14 +368,6 @@ class Controller(QtWidgets.QMainWindow):
         return self.A if self.tgt_a.isChecked() else self.B
 
     # ---------------------------------------------------------------- 입력
-    def eventFilter(self, obj, ev):
-        if ev.type() == QtCore.QEvent.KeyPress and not ev.isAutoRepeat():
-            if ev.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, QtCore.Qt.Key_Space):
-                for p in self._input_targets():
-                    p.toggle_manual()
-                return True
-        return super().eventFilter(obj, ev)
-
     def _input_targets(self):
         # LINK 면 A 만 조작(=B 미러로 따라옴), 아니면 선택 패널
         return [self.A] if self.link_cb.isChecked() else [self._active()]
@@ -453,8 +399,6 @@ class Controller(QtWidgets.QMainWindow):
                 return
             xb = bool(self._js.get_button(0))   # ✕ Cross = STOP
             ob = bool(self._js.get_button(1))   # ○ Circle = START
-            sq = bool(self._js.get_button(2))   # □ Square = 방향 토글
-            ax = self._js.get_axis(0)
         except Exception:
             self._js = None
             self.pad_lbl.setText("PS5: 미연결")
@@ -466,14 +410,7 @@ class Controller(QtWidgets.QMainWindow):
         if ob and not self._oprev:
             for p in tgts:
                 p.start()
-        if sq and not self._sqprev:
-            for p in tgts:
-                p.toggle_manual()       # □ 누를 때마다 -측↔+측 토글
-        self._xprev, self._oprev, self._sqprev = xb, ob, sq
-        if abs(ax) > 0.5:               # 스틱은 방향 직접지정(보조)
-            side = +1 if ax > 0 else -1
-            for p in tgts:
-                p.manual_side = side
+        self._xprev, self._oprev = xb, ob
         scope = "A+B (LINK)" if self.link_cb.isChecked() else self._active().name
         self.pad_lbl.setText(f"PS5: {self._js_name[:16]}  대상 {scope}")
 
@@ -499,16 +436,13 @@ class Controller(QtWidgets.QMainWindow):
         self.B.refresh_status()
 
     def _mirror(self, a: SystemPanel, b: SystemPanel):
-        """LINK: A → B 미러 (IP/Port 제외한 제어값 — 파형/속도/각도/극성/측/run)."""
-        if b.wave_combo.currentIndex() != a.wave_combo.currentIndex():
-            b.wave_combo.setCurrentIndex(a.wave_combo.currentIndex())
+        """LINK: A → B 미러 (IP/Port 제외한 제어값 — 속도/강도/극성/run)."""
         if b.speed_slider.value() != a.speed_slider.value():
             b.speed_slider.setValue(a.speed_slider.value())
         if b.angle_slider.value() != a.angle_slider.value():
             b.angle_slider.setValue(a.angle_slider.value())
         b.pol_m1.setChecked(a.pol_m1.isChecked())
         b.pol_m2.setChecked(a.pol_m2.isChecked())
-        b.manual_side = a.manual_side
         if b.running != a.running:
             b.btn.setChecked(a.running)
 
