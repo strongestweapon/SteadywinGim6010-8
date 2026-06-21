@@ -539,8 +539,8 @@ class Controller(QtWidgets.QMainWindow):
         cv = QtWidgets.QVBoxLayout(col)
 
         btn = QtWidgets.QPushButton()
-        btn.setMinimumHeight(56)
-        btn.setStyleSheet("font-weight:bold; padding:6px;")
+        btn.setMinimumHeight(76)
+        btn.setStyleSheet("font-weight:bold; padding:6px; text-align:center;")
         btn.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
         cv.addWidget(btn)
         self.scene_btns.append(btn)
@@ -617,6 +617,15 @@ class Controller(QtWidgets.QMainWindow):
         self._rebuild_scene_cols()
 
     # ---- 씬 데이터 ↔ 씬칸 위젯 ----
+    @staticmethod
+    def _scene_btn_text(sc) -> str:
+        """버튼 라벨 = 이름 + A/B 요약 (담기/편집 시 눈에 띄게 바뀜)."""
+        def part(on, f, amp, tw):
+            return (f"{f:.1f}Hz·{amp}%" + ("↔" if tw else "")) if on else "off"
+        a = part(sc["a_on"], sc["a_freq"], sc["a_amp"], sc["a_twist"])
+        b = part(sc["b_on"], sc["b_freq"], sc["b_amp"], sc["b_twist"])
+        return f"{sc['name']}\nA {a}   B {b}   Δφ{sc['phase']}°"
+
     def _refresh_scene_ui(self):
         """self.scenes → 각 씬칸 위젯 + 버튼 라벨."""
         self._sw_block = True
@@ -627,7 +636,7 @@ class Controller(QtWidgets.QMainWindow):
             sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
             sw["a_twist"].setChecked(sc["a_twist"]); sw["b_twist"].setChecked(sc["b_twist"])
             sw["phase"].setValue(sc["phase"])
-            self.scene_btns[i].setText(sc["name"])
+            self.scene_btns[i].setText(self._scene_btn_text(sc))
         self._sw_block = False
 
     def _scene_widgets_changed(self, i: int):
@@ -642,7 +651,7 @@ class Controller(QtWidgets.QMainWindow):
             "a_twist": sw["a_twist"].isChecked(), "b_twist": sw["b_twist"].isChecked(),
             "phase": sw["phase"].value(),
         }
-        self.scene_btns[i].setText(self.scenes[i]["name"])
+        self.scene_btns[i].setText(self._scene_btn_text(self.scenes[i]))
 
     def _capture_scene(self, i: int):
         """현재 두 패널의 슬라이더/동작/극성 상태를 씬 i 로 담기 (위상차는 유지)."""
