@@ -117,19 +117,11 @@ class SystemPanel(QtWidgets.QGroupBox):
         self.angle_slider.sliderMoved.connect(self._user_touch)
 
         r += 1
-        g.addWidget(QtWidgets.QLabel("극성반전"), r, 0)
-        pol = QtWidgets.QHBoxLayout()
-        self.pol_m1 = QtWidgets.QCheckBox("모터1")
-        self.pol_m2 = QtWidgets.QCheckBox("모터2")
-        self.pol_m2.setChecked(True)   # node2 미러 장착 기본 반전
-        self.pol_m1.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 적용 setChecked 는 제외)
-        self.pol_m2.clicked.connect(self._user_touch)
-        pol.addWidget(self.pol_m1)
-        pol.addWidget(self.pol_m2)
-        pol.addStretch(1)
-        w = QtWidgets.QWidget()
-        w.setLayout(pol)
-        g.addWidget(w, r, 1, 1, 3)
+        g.addWidget(QtWidgets.QLabel("극성"), r, 0)
+        self.twist = QtWidgets.QCheckBox("두 모터 반대방향 (트위스트)")
+        self.twist.setToolTip("안 누름=두 모터 같은 방향(평행, 기본).  누름=반대 방향(트위스트).")
+        self.twist.clicked.connect(self._user_touch)   # 사용자 클릭만 (씬 적용 setChecked 는 제외)
+        g.addWidget(self.twist, r, 1, 1, 3)
 
         r += 1
         self.btn = QtWidgets.QPushButton("▶ 동작")
@@ -285,9 +277,8 @@ class SystemPanel(QtWidgets.QGroupBox):
         if drop_pct > 0 and _rand100() < drop_pct:
             return   # 패킷손실 시뮬
         flags = 0
-        if self.pol_m1.isChecked():
-            flags |= proto.POL_M1
-        if self.pol_m2.isChecked():
+        # 극성: 같이(평행)=모터2 반전(기본), 반대(트위스트)=반전 없음
+        if not self.twist.isChecked():
             flags |= proto.POL_M2
         if self.tare_ticks > 0:
             flags |= proto.REQ_TARE
@@ -379,10 +370,10 @@ def _rand100() -> int:
     return random.randint(0, 99)
 
 
-# 씬 한 개의 기본값 (극성: node2=모터2 미러 장착 기본 반전 → a_pol2/b_pol2=True)
+# 씬 한 개의 기본값 (twist=False=두 모터 같이/평행 기본)
 _SCENE_DEFAULTS = {
-    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 50, "a_pol1": False, "a_pol2": True,
-    "b_on": True, "b_freq": 0.4, "b_amp": 50, "b_pol1": False, "b_pol2": True, "phase": 0,
+    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 50, "a_twist": False,
+    "b_on": True, "b_freq": 0.4, "b_amp": 50, "b_twist": False, "phase": 0,
 }
 
 
@@ -544,7 +535,7 @@ class Controller(QtWidgets.QMainWindow):
     def _make_scene_col(self, i: int) -> QtWidgets.QGroupBox:
         """씬 한 칸 위젯 생성. self.sw / self.scene_btns 에 순서대로 append."""
         col = QtWidgets.QGroupBox()
-        col.setMinimumWidth(330)   # A1/A2 가 같은 줄에 들어가 넓어짐
+        col.setMinimumWidth(280)
         cv = QtWidgets.QVBoxLayout(col)
 
         btn = QtWidgets.QPushButton()
@@ -560,25 +551,23 @@ class Controller(QtWidgets.QMainWindow):
 
         nob = QtWidgets.QAbstractSpinBox.NoButtons   # 위아래 화살표 없이 타이핑만 (공간 절약)
 
-        # A 줄 = [A 켜기] freq amp + 모터별 극성반전 A1 A2  (node2=A2 미러 기본 반전)
+        # A 줄 = [A 켜기] freq amp [반대=트위스트]
         a_on = QtWidgets.QCheckBox("A")
         a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz"); a_freq.setButtonSymbols(nob)
         a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 100); a_amp.setSuffix(" %"); a_amp.setButtonSymbols(nob)
-        a_p1 = QtWidgets.QCheckBox("A1"); a_p1.setToolTip("A 모터1 극성반전")
-        a_p2 = QtWidgets.QCheckBox("A2"); a_p2.setToolTip("A 모터2 극성반전")
+        a_tw = QtWidgets.QCheckBox("반대"); a_tw.setToolTip("A 두 모터 반대방향(트위스트). 안 누르면 같이(평행)")
         ar = QtWidgets.QHBoxLayout()
-        for x in (a_on, a_freq, a_amp, a_p1, a_p2):
+        for x in (a_on, a_freq, a_amp, a_tw):
             ar.addWidget(x)
         cv.addLayout(ar)
 
-        # B 줄 = [B 켜기] freq amp + 극성반전 B1 B2
+        # B 줄 = [B 켜기] freq amp [반대=트위스트]
         b_on = QtWidgets.QCheckBox("B")
         b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz"); b_freq.setButtonSymbols(nob)
         b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 100); b_amp.setSuffix(" %"); b_amp.setButtonSymbols(nob)
-        b_p1 = QtWidgets.QCheckBox("B1"); b_p1.setToolTip("B 모터1 극성반전")
-        b_p2 = QtWidgets.QCheckBox("B2"); b_p2.setToolTip("B 모터2 극성반전")
+        b_tw = QtWidgets.QCheckBox("반대"); b_tw.setToolTip("B 두 모터 반대방향(트위스트). 안 누르면 같이(평행)")
         br = QtWidgets.QHBoxLayout()
-        for x in (b_on, b_freq, b_amp, b_p1, b_p2):
+        for x in (b_on, b_freq, b_amp, b_tw):
             br.addWidget(x)
         cv.addLayout(br)
 
@@ -593,13 +582,12 @@ class Controller(QtWidgets.QMainWindow):
         cr = QtWidgets.QHBoxLayout(); cr.addWidget(cap); cr.addWidget(delb)
         cv.addLayout(cr)
 
-        self.sw.append({"name": name, "a_on": a_on, "a_freq": a_freq, "a_amp": a_amp,
-                        "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "phase": ph,
-                        "a_pol1": a_p1, "a_pol2": a_p2, "b_pol1": b_p1, "b_pol2": b_p2})
+        self.sw.append({"name": name, "a_on": a_on, "a_freq": a_freq, "a_amp": a_amp, "a_twist": a_tw,
+                        "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "b_twist": b_tw, "phase": ph})
         name.textChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         for wdg in (a_freq, a_amp, b_freq, b_amp, ph):
             wdg.valueChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
-        for wdg in (a_on, b_on, a_p1, a_p2, b_p1, b_p2):
+        for wdg in (a_on, b_on, a_tw, b_tw):
             wdg.toggled.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         return col
 
@@ -637,8 +625,7 @@ class Controller(QtWidgets.QMainWindow):
             sw["name"].setText(sc["name"])
             sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
             sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
-            sw["a_pol1"].setChecked(sc["a_pol1"]); sw["a_pol2"].setChecked(sc["a_pol2"])
-            sw["b_pol1"].setChecked(sc["b_pol1"]); sw["b_pol2"].setChecked(sc["b_pol2"])
+            sw["a_twist"].setChecked(sc["a_twist"]); sw["b_twist"].setChecked(sc["b_twist"])
             sw["phase"].setValue(sc["phase"])
             self.scene_btns[i].setText(sc["name"])
         self._sw_block = False
@@ -652,8 +639,7 @@ class Controller(QtWidgets.QMainWindow):
             "name": sw["name"].text() or f"씬 {i + 1}",
             "a_on": sw["a_on"].isChecked(), "a_freq": round(sw["a_freq"].value(), 1), "a_amp": sw["a_amp"].value(),
             "b_on": sw["b_on"].isChecked(), "b_freq": round(sw["b_freq"].value(), 1), "b_amp": sw["b_amp"].value(),
-            "a_pol1": sw["a_pol1"].isChecked(), "a_pol2": sw["a_pol2"].isChecked(),
-            "b_pol1": sw["b_pol1"].isChecked(), "b_pol2": sw["b_pol2"].isChecked(),
+            "a_twist": sw["a_twist"].isChecked(), "b_twist": sw["b_twist"].isChecked(),
             "phase": sw["phase"].value(),
         }
         self.scene_btns[i].setText(self.scenes[i]["name"])
@@ -664,8 +650,7 @@ class Controller(QtWidgets.QMainWindow):
             "name": self.scenes[i]["name"],
             "a_on": self.A.running, "a_freq": round(self.A.speed_slider.value() / 10.0, 1), "a_amp": self.A.angle_slider.value(),
             "b_on": self.B.running, "b_freq": round(self.B.speed_slider.value() / 10.0, 1), "b_amp": self.B.angle_slider.value(),
-            "a_pol1": self.A.pol_m1.isChecked(), "a_pol2": self.A.pol_m2.isChecked(),
-            "b_pol1": self.B.pol_m1.isChecked(), "b_pol2": self.B.pol_m2.isChecked(),
+            "a_twist": self.A.twist.isChecked(), "b_twist": self.B.twist.isChecked(),
             "phase": self.scenes[i]["phase"],
         }
         self._refresh_scene_ui()
@@ -699,9 +684,8 @@ class Controller(QtWidgets.QMainWindow):
     def _apply_scene(self, idx: int):
         sc = self.scenes[idx]
         self.A.set_scene(sc["name"]); self.B.set_scene(sc["name"])   # 제목에 '적용중' 표시
-        # 극성 반전을 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
-        self.A.pol_m1.setChecked(sc["a_pol1"]); self.A.pol_m2.setChecked(sc["a_pol2"])
-        self.B.pol_m1.setChecked(sc["b_pol1"]); self.B.pol_m2.setChecked(sc["b_pol2"])
+        # 극성(반대방향) 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
+        self.A.twist.setChecked(sc["a_twist"]); self.B.twist.setChecked(sc["b_twist"])
         n = max(1, int(self.crossfade_spin.value() * SEND_HZ))
         a_speed = max(1, round(sc["a_freq"] * 10))
         b_speed = max(1, round(sc["b_freq"] * 10))
