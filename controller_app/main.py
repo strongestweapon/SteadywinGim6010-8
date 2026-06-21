@@ -405,7 +405,6 @@ class Controller(QtWidgets.QMainWindow):
         if data:
             self.scenes = data
             self._refresh_scene_ui()
-            self._load_editor()
 
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(int(1000 / SEND_HZ))
@@ -468,59 +467,61 @@ class Controller(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- 공연(씬) UI
     def _build_show(self):
+        """씬 5개를 각각 [적용버튼 + 그 칸 안에 A/B 켜기·freq·amp·위상차]로 나란히."""
         box = QtWidgets.QGroupBox("공연 (씬) — 버튼 누르면 그 씬으로 부드럽게 전환")
-        v = QtWidgets.QVBoxLayout(box)
-
-        # 씬 버튼 줄
-        row = QtWidgets.QHBoxLayout()
+        outer = QtWidgets.QVBoxLayout(box)
+        self._sw_block = False
         self.scene_btns = []
+        self.sw = []   # 씬별 위젯 모음 [{name,a_on,a_freq,a_amp,b_on,b_freq,b_amp,phase}]
+
+        cols = QtWidgets.QHBoxLayout()
         for i in range(SCENE_COUNT):
-            b = QtWidgets.QPushButton()
-            b.setMinimumHeight(96)
-            b.setStyleSheet("text-align:left; padding:6px; font-weight:bold;")
-            b.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
-            row.addWidget(b)
-            self.scene_btns.append(b)
-        v.addLayout(row)
+            col = QtWidgets.QGroupBox()
+            cv = QtWidgets.QVBoxLayout(col)
 
-        # 편집 영역
-        self._edit_block = False
-        eg = QtWidgets.QGridLayout()
-        eg.addWidget(QtWidgets.QLabel("편집"), 0, 0)
-        self.edit_combo = QtWidgets.QComboBox()
-        for i in range(SCENE_COUNT):
-            self.edit_combo.addItem(f"씬 {i + 1}")
-        self.edit_combo.currentIndexChanged.connect(self._load_editor)
-        eg.addWidget(self.edit_combo, 0, 1)
-        eg.addWidget(QtWidgets.QLabel("이름"), 0, 2)
-        self.e_name = QtWidgets.QLineEdit()
-        eg.addWidget(self.e_name, 0, 3, 1, 2)
+            btn = QtWidgets.QPushButton()
+            btn.setMinimumHeight(56)
+            btn.setStyleSheet("font-weight:bold; padding:6px;")
+            btn.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
+            cv.addWidget(btn)
+            self.scene_btns.append(btn)
 
-        self.e_a_on = QtWidgets.QCheckBox("A 켜기")
-        self.e_a_freq = QtWidgets.QDoubleSpinBox()
-        self.e_a_freq.setRange(0.1, proto.FREQ_MAX); self.e_a_freq.setSingleStep(0.1); self.e_a_freq.setSuffix(" Hz")
-        self.e_a_amp = QtWidgets.QSpinBox(); self.e_a_amp.setRange(0, 100); self.e_a_amp.setSuffix(" %")
-        eg.addWidget(self.e_a_on, 1, 0)
-        eg.addWidget(QtWidgets.QLabel("A 주파수"), 1, 1); eg.addWidget(self.e_a_freq, 1, 2)
-        eg.addWidget(QtWidgets.QLabel("A 진폭"), 1, 3); eg.addWidget(self.e_a_amp, 1, 4)
+            name = QtWidgets.QLineEdit()
+            name.setPlaceholderText("이름")
+            cv.addWidget(name)
 
-        self.e_b_on = QtWidgets.QCheckBox("B 켜기")
-        self.e_b_freq = QtWidgets.QDoubleSpinBox()
-        self.e_b_freq.setRange(0.1, proto.FREQ_MAX); self.e_b_freq.setSingleStep(0.1); self.e_b_freq.setSuffix(" Hz")
-        self.e_b_amp = QtWidgets.QSpinBox(); self.e_b_amp.setRange(0, 100); self.e_b_amp.setSuffix(" %")
-        eg.addWidget(self.e_b_on, 2, 0)
-        eg.addWidget(QtWidgets.QLabel("B 주파수"), 2, 1); eg.addWidget(self.e_b_freq, 2, 2)
-        eg.addWidget(QtWidgets.QLabel("B 진폭"), 2, 3); eg.addWidget(self.e_b_amp, 2, 4)
+            a_on = QtWidgets.QCheckBox("A")
+            a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz")
+            a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 100); a_amp.setSuffix(" %")
+            ar = QtWidgets.QHBoxLayout(); ar.addWidget(a_on); ar.addWidget(a_freq); ar.addWidget(a_amp)
+            cv.addLayout(ar)
 
-        self.e_phase = QtWidgets.QSpinBox(); self.e_phase.setRange(0, 359); self.e_phase.setSuffix("°")
-        eg.addWidget(QtWidgets.QLabel("A↔B 위상차"), 3, 1); eg.addWidget(self.e_phase, 3, 2)
-        v.addLayout(eg)
+            b_on = QtWidgets.QCheckBox("B")
+            b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz")
+            b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 100); b_amp.setSuffix(" %")
+            br = QtWidgets.QHBoxLayout(); br.addWidget(b_on); br.addWidget(b_freq); br.addWidget(b_amp)
+            cv.addLayout(br)
 
-        # 하단: 캡처 / 전환시간 / 저장·불러오기
+            ph = QtWidgets.QSpinBox(); ph.setRange(0, 359); ph.setSuffix("°")
+            pr = QtWidgets.QHBoxLayout(); pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph); pr.addStretch(1)
+            cv.addLayout(pr)
+
+            cap = QtWidgets.QPushButton("현재값 담기")
+            cap.clicked.connect(lambda _=False, idx=i: self._capture_scene(idx))
+            cv.addWidget(cap)
+
+            self.sw.append({"name": name, "a_on": a_on, "a_freq": a_freq, "a_amp": a_amp,
+                            "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "phase": ph})
+            name.textChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
+            for wdg in (a_freq, a_amp, b_freq, b_amp, ph):
+                wdg.valueChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
+            for wdg in (a_on, b_on):
+                wdg.toggled.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
+            cols.addWidget(col)
+        outer.addLayout(cols)
+
+        # 공통 하단: 전환시간 / 저장·불러오기
         bot = QtWidgets.QHBoxLayout()
-        cap = QtWidgets.QPushButton("현재 패널값 → 이 씬")
-        cap.clicked.connect(self._capture_scene)
-        bot.addWidget(cap)
         bot.addWidget(QtWidgets.QLabel("전환시간"))
         self.crossfade_spin = QtWidgets.QDoubleSpinBox()
         self.crossfade_spin.setRange(0.0, 5.0); self.crossfade_spin.setSingleStep(0.1)
@@ -530,67 +531,52 @@ class Controller(QtWidgets.QMainWindow):
         sv = QtWidgets.QPushButton("저장"); sv.clicked.connect(self._save_shows)
         ld = QtWidgets.QPushButton("불러오기"); ld.clicked.connect(self._load_shows)
         bot.addWidget(sv); bot.addWidget(ld)
-        v.addLayout(bot)
+        outer.addLayout(bot)
 
         note = QtWidgets.QLabel(
             "위상차 = 스태거드 스타트(B가 켜질 때 A 위상에 맞춰 시작). "
             "둘 다 켜진 채 위상만 바꾸려면 그 씬에서 B를 한 번 재시작(STOP 후 적용).")
         note.setStyleSheet("color:#888;"); note.setWordWrap(True)
-        v.addWidget(note)
-
-        # 편집 필드 변경 → 씬에 즉시 반영
-        self.e_name.textChanged.connect(self._editor_to_scene)
-        for w in (self.e_a_freq, self.e_a_amp, self.e_b_freq, self.e_b_amp, self.e_phase):
-            w.valueChanged.connect(self._editor_to_scene)
-        for w in (self.e_a_on, self.e_b_on):
-            w.toggled.connect(self._editor_to_scene)
+        outer.addWidget(note)
 
         self._refresh_scene_ui()
-        self._load_editor()
         return box
 
-    # ---- 씬 데이터 ↔ UI ----
-    def _scene_summary(self, sc) -> str:
-        a = f"A {sc['a_freq']:.1f}Hz {sc['a_amp']}%" if sc["a_on"] else "A 끔"
-        b = f"B {sc['b_freq']:.1f}Hz {sc['b_amp']}%" if sc["b_on"] else "B 끔"
-        return f"{sc['name']}\n{a}\n{b}\nΔφ {sc['phase']}°"
-
+    # ---- 씬 데이터 ↔ 씬칸 위젯 ----
     def _refresh_scene_ui(self):
-        for i, b in enumerate(self.scene_btns):
-            b.setText(self._scene_summary(self.scenes[i]))
+        """self.scenes → 각 씬칸 위젯 + 버튼 라벨."""
+        self._sw_block = True
+        for i, sc in enumerate(self.scenes):
+            sw = self.sw[i]
+            sw["name"].setText(sc["name"])
+            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
+            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
+            sw["phase"].setValue(sc["phase"])
+            self.scene_btns[i].setText(sc["name"])
+        self._sw_block = False
 
-    def _load_editor(self):
-        sc = self.scenes[self.edit_combo.currentIndex()]
-        self._edit_block = True
-        self.e_name.setText(sc["name"])
-        self.e_a_on.setChecked(sc["a_on"]); self.e_a_freq.setValue(sc["a_freq"]); self.e_a_amp.setValue(sc["a_amp"])
-        self.e_b_on.setChecked(sc["b_on"]); self.e_b_freq.setValue(sc["b_freq"]); self.e_b_amp.setValue(sc["b_amp"])
-        self.e_phase.setValue(sc["phase"])
-        self._edit_block = False
-
-    def _editor_to_scene(self):
-        if self._edit_block:
+    def _scene_widgets_changed(self, i: int):
+        """씬칸 위젯 변경 → self.scenes[i] 갱신 + 버튼 라벨."""
+        if self._sw_block:
             return
-        i = self.edit_combo.currentIndex()
+        sw = self.sw[i]
         self.scenes[i] = {
-            "name": self.e_name.text() or f"씬 {i + 1}",
-            "a_on": self.e_a_on.isChecked(), "a_freq": round(self.e_a_freq.value(), 1), "a_amp": self.e_a_amp.value(),
-            "b_on": self.e_b_on.isChecked(), "b_freq": round(self.e_b_freq.value(), 1), "b_amp": self.e_b_amp.value(),
-            "phase": self.e_phase.value(),
+            "name": sw["name"].text() or f"씬 {i + 1}",
+            "a_on": sw["a_on"].isChecked(), "a_freq": round(sw["a_freq"].value(), 1), "a_amp": sw["a_amp"].value(),
+            "b_on": sw["b_on"].isChecked(), "b_freq": round(sw["b_freq"].value(), 1), "b_amp": sw["b_amp"].value(),
+            "phase": sw["phase"].value(),
         }
-        self.scene_btns[i].setText(self._scene_summary(self.scenes[i]))
+        self.scene_btns[i].setText(self.scenes[i]["name"])
 
-    def _capture_scene(self):
-        """현재 두 패널의 슬라이더/동작상태를 편집 중인 씬으로 저장."""
-        i = self.edit_combo.currentIndex()
+    def _capture_scene(self, i: int):
+        """현재 두 패널의 슬라이더/동작상태를 씬 i 로 담기 (위상차는 유지)."""
         self.scenes[i] = {
             "name": self.scenes[i]["name"],
             "a_on": self.A.running, "a_freq": round(self.A.speed_slider.value() / 10.0, 1), "a_amp": self.A.angle_slider.value(),
             "b_on": self.B.running, "b_freq": round(self.B.speed_slider.value() / 10.0, 1), "b_amp": self.B.angle_slider.value(),
-            "phase": self.e_phase.value(),
+            "phase": self.scenes[i]["phase"],
         }
-        self._load_editor()
-        self.scene_btns[i].setText(self._scene_summary(self.scenes[i]))
+        self._refresh_scene_ui()
 
     # ---- 쇼파일 저장/불러오기 ----
     def _read_shows_file(self):
@@ -616,7 +602,6 @@ class Controller(QtWidgets.QMainWindow):
         if data:
             self.scenes = data
             self._refresh_scene_ui()
-            self._load_editor()
 
     # ---- 씬 적용 + 스태거드 스타트 엔진 ----
     def _apply_scene(self, idx: int):
@@ -768,13 +753,13 @@ class Controller(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    # 글씨 2배 — 무대 현장에서 멀리서도 보이게 (시스템 기본 폰트의 2배)
+    # 글씨 1.5배 — 무대 현장 가독성 (2배는 너무 커서 공간 부족)
     f = app.font()
     base = f.pointSizeF() if f.pointSizeF() > 0 else 9.0
-    f.setPointSizeF(base * 2.0)
+    f.setPointSizeF(base * 1.5)
     app.setFont(f)
     win = Controller()
-    win.resize(1500, 820)
+    win.resize(1500, 880)
     win.show()
     sys.exit(app.exec())
 
