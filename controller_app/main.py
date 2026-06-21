@@ -491,13 +491,13 @@ class Controller(QtWidgets.QMainWindow):
             cv.addWidget(name)
 
             a_on = QtWidgets.QCheckBox("A")
-            a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz")
+            a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setToolTip("주파수 [Hz]")
             a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 100); a_amp.setSuffix(" %")
             ar = QtWidgets.QHBoxLayout(); ar.addWidget(a_on); ar.addWidget(a_freq); ar.addWidget(a_amp)
             cv.addLayout(ar)
 
             b_on = QtWidgets.QCheckBox("B")
-            b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz")
+            b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setToolTip("주파수 [Hz]")
             b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 100); b_amp.setSuffix(" %")
             br = QtWidgets.QHBoxLayout(); br.addWidget(b_on); br.addWidget(b_freq); br.addWidget(b_amp)
             cv.addLayout(br)
