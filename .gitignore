@@ -36,3 +36,6 @@ manual.txt
 # Background task 출력
 tasks/
 *.output
+
+# 사용자 저장 쇼파일 (씬 프리셋 — 로컬 데이터)
+controller_app/shows/

@@ -2,6 +2,21 @@
 
 **GitHub**: https://github.com/strongestweapon/SteadywinGim6010-8
 
+## 2026-06-21 세션 요약 (컨트롤러 앱 공연모드 + OSC — 전부 앱만, 펌웨어/모터 변경 0)
+
+브랜치 **`work-2026-06-21`** (체크포인트 1~19, origin 푸시). `main`=어제(bfb24d0) 안전점 유지(머지 안 함). **모터 실연결 못 해 헤드리스 검증만 — 실모터 검증 미완.**
+
+- **공연(씬) 모드** (`controller_app/main.py`, 화면 아래): 씬 = 칸별 인라인(편집콤보 없음). 각 칸 = [적용버튼(이름+A/B 요약) + 이름 + A줄(☑A·freq·amp·Twist) + B줄 + Δφ + Capture/Delete]. **+Add scene/✕Delete 동적 + 가로스크롤**, 전환시간(크로스페이드), Save/Load(`shows/show.json`, gitignore).
+  - **부드러운 전환**: 슬라이더를 목표로 ramp(위상 연속). fade-in 시 freq 즉시·진폭만 페이드(A·B 위상 안 어긋나게).
+  - **A↔B 위상차 = 앱-side 스태거드 스타트** (펌웨어 재플래시 불필요! `start_running(0.0f)` 이용, B를 A위상모델 목표각 도달 시 START). 검증 180/90/0→180/91/0°.
+  - **극성 = "Twist"(두 모터 반대방향) 토글 1개** (모터1/2 2체크 아님). 안 누름=평행(POL_M2), 누름=반대.
+  - **진폭 = 각도(°)** (강도% 아님). 0~60°, **주파수별 자동 클램프**(출력=min(°, amp_deg_max(freq))+ESP32 이중). 씬 진폭칸 타이핑 자유(80 쳐도 됨)→확정 시 freq한계로 줄임.
+  - Run/Stop 라벨, 패널 제목에 현재 씬 표시(수동조작 시 *edited).
+- **통신두절 빨간 피드백**(시스템별 never/stale), **실측 drop%**(텔레메트리 seq간격), **글씨 1.5배**, **다크모드**(Fusion 팔레트+pyqtgraph), **UI 전부 영어**(코드 주석만 한글), **수동 스윙·LINK 제거**.
+- **OSC 수신(receive-only)**: python-osc(.venv 설치). 주소 **`/mirror/scene/<N>`**(1-based, 인자없음) 또는 `/mirror/scene <num>`(int/float/string). "OSC in" 토글+port 9000. 별도 스레드→Qt Signal(스레드 안전). 송신/learn/MIDI 추후.
+- 상세: 메모리 `project_show_mode`, `project_app_conn_feedback`.
+- **다음(모터 연결 시)**: 실배선 2대 검증(부호/위상차/통신두절 실동작) + 진폭 각도 감각 + 둘째 ESP32 플래시·IP(B=192.168.0.47).
+
 ## 하드웨어 / 펌웨어 상태 (2026-05-12 기준)
 
 - **모터**: SteadyWin GIM6010-8 (24V, 출력축 인코더 포함, 8:1 기어비, 14 pole-pair, 5N·m peak)
