@@ -385,10 +385,17 @@ _SCENE_DEFAULTS = {
 
 
 def _norm_scene(sc) -> dict:
-    """누락 키를 기본값으로 채움 (옛 쇼파일/극성 추가 전 파일 호환)."""
+    """누락 키를 기본값으로 채움 + 진폭을 주파수 한계로 클램프 (옛 쇼파일/극성 추가 전 파일 호환)."""
     out = dict(_SCENE_DEFAULTS)
     out.update(sc or {})
+    out["a_amp"] = min(int(out["a_amp"]), int(amp_deg_max_safe(out["a_freq"])))
+    out["b_amp"] = min(int(out["b_amp"]), int(amp_deg_max_safe(out["b_freq"])))
     return out
+
+
+def amp_deg_max_safe(freq) -> float:
+    """그 주파수에서 허용 최대 출력각 [°]."""
+    return proto.amp_deg_max(float(freq), 1.0)
 
 
 def _default_scenes():
@@ -561,7 +568,7 @@ class Controller(QtWidgets.QMainWindow):
         # A 줄 = [A 켜기] freq amp [반대=트위스트]
         a_on = QtWidgets.QCheckBox("A")
         a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz"); a_freq.setButtonSymbols(nob)
-        a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, int(proto.AMP_DEG_MAX)); a_amp.setSuffix("°"); a_amp.setButtonSymbols(nob)
+        a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 360); a_amp.setSuffix("°"); a_amp.setButtonSymbols(nob); a_amp.setKeyboardTracking(False)
         a_tw = QtWidgets.QCheckBox("Twist"); a_tw.setToolTip("A: two motors opposite direction (twist). Unchecked = same direction (parallel)")
         ar = QtWidgets.QHBoxLayout()
         for x in (a_on, a_freq, a_amp, a_tw):
@@ -571,7 +578,7 @@ class Controller(QtWidgets.QMainWindow):
         # B 줄 = [B 켜기] freq amp [반대=트위스트]
         b_on = QtWidgets.QCheckBox("B")
         b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz"); b_freq.setButtonSymbols(nob)
-        b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, int(proto.AMP_DEG_MAX)); b_amp.setSuffix("°"); b_amp.setButtonSymbols(nob)
+        b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 360); b_amp.setSuffix("°"); b_amp.setButtonSymbols(nob); b_amp.setKeyboardTracking(False)
         b_tw = QtWidgets.QCheckBox("Twist"); b_tw.setToolTip("B: two motors opposite direction (twist). Unchecked = same direction (parallel)")
         br = QtWidgets.QHBoxLayout()
         for x in (b_on, b_freq, b_amp, b_tw):
@@ -639,29 +646,30 @@ class Controller(QtWidgets.QMainWindow):
         for i, sc in enumerate(self.scenes):
             sw = self.sw[i]
             sw["name"].setText(sc["name"])
-            # 진폭 상한 = 그 주파수의 amp_deg_max (먼저 적용 후 값 세팅 → 초과면 자동 클램프)
-            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"])
-            sw["a_amp"].setMaximum(int(proto.amp_deg_max(sc["a_freq"], 1.0))); sw["a_amp"].setValue(sc["a_amp"])
-            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"])
-            sw["b_amp"].setMaximum(int(proto.amp_deg_max(sc["b_freq"], 1.0))); sw["b_amp"].setValue(sc["b_amp"])
+            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
+            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
             sw["a_twist"].setChecked(sc["a_twist"]); sw["b_twist"].setChecked(sc["b_twist"])
             sw["phase"].setValue(sc["phase"])
             self.scene_btns[i].setText(self._scene_btn_text(sc))
         self._sw_block = False
 
-    def _update_amp_limits(self, i: int):
-        """씬 진폭 상한 = 그 씬 주파수의 amp_deg_max (초과 입력 자동 클램프, 패널 런타임과 일치)."""
+    def _clamp_scene_amp(self, i: int):
+        """입력 끝난 진폭을 그 주파수의 최대각으로 줄임 (입력 중엔 막지 않음 → 타이핑 자유)."""
         self._sw_block = True
         sw = self.sw[i]
-        sw["a_amp"].setMaximum(int(proto.amp_deg_max(sw["a_freq"].value(), 1.0)))
-        sw["b_amp"].setMaximum(int(proto.amp_deg_max(sw["b_freq"].value(), 1.0)))
+        am = int(amp_deg_max_safe(sw["a_freq"].value()))
+        bm = int(amp_deg_max_safe(sw["b_freq"].value()))
+        if sw["a_amp"].value() > am:
+            sw["a_amp"].setValue(am)
+        if sw["b_amp"].value() > bm:
+            sw["b_amp"].setValue(bm)
         self._sw_block = False
 
     def _scene_widgets_changed(self, i: int):
         """씬칸 위젯 변경 → self.scenes[i] 갱신 + 버튼 라벨."""
         if self._sw_block:
             return
-        self._update_amp_limits(i)   # 주파수 바뀌면 진폭 상한 갱신(초과면 자동으로 줄어듦)
+        self._clamp_scene_amp(i)   # 주파수 한계로 줄임(초과 입력/주파수 상승 시)
         sw = self.sw[i]
         self.scenes[i] = {
             "name": sw["name"].text() or f"Scene {i + 1}",
