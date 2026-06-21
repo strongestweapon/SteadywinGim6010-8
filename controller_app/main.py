@@ -639,17 +639,29 @@ class Controller(QtWidgets.QMainWindow):
         for i, sc in enumerate(self.scenes):
             sw = self.sw[i]
             sw["name"].setText(sc["name"])
-            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
-            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
+            # 진폭 상한 = 그 주파수의 amp_deg_max (먼저 적용 후 값 세팅 → 초과면 자동 클램프)
+            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"])
+            sw["a_amp"].setMaximum(int(proto.amp_deg_max(sc["a_freq"], 1.0))); sw["a_amp"].setValue(sc["a_amp"])
+            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"])
+            sw["b_amp"].setMaximum(int(proto.amp_deg_max(sc["b_freq"], 1.0))); sw["b_amp"].setValue(sc["b_amp"])
             sw["a_twist"].setChecked(sc["a_twist"]); sw["b_twist"].setChecked(sc["b_twist"])
             sw["phase"].setValue(sc["phase"])
             self.scene_btns[i].setText(self._scene_btn_text(sc))
+        self._sw_block = False
+
+    def _update_amp_limits(self, i: int):
+        """씬 진폭 상한 = 그 씬 주파수의 amp_deg_max (초과 입력 자동 클램프, 패널 런타임과 일치)."""
+        self._sw_block = True
+        sw = self.sw[i]
+        sw["a_amp"].setMaximum(int(proto.amp_deg_max(sw["a_freq"].value(), 1.0)))
+        sw["b_amp"].setMaximum(int(proto.amp_deg_max(sw["b_freq"].value(), 1.0)))
         self._sw_block = False
 
     def _scene_widgets_changed(self, i: int):
         """씬칸 위젯 변경 → self.scenes[i] 갱신 + 버튼 라벨."""
         if self._sw_block:
             return
+        self._update_amp_limits(i)   # 주파수 바뀌면 진폭 상한 갱신(초과면 자동으로 줄어듦)
         sw = self.sw[i]
         self.scenes[i] = {
             "name": sw["name"].text() or f"Scene {i + 1}",
