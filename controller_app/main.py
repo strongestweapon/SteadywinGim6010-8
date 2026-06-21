@@ -357,14 +357,31 @@ def _rand100() -> int:
     return random.randint(0, 99)
 
 
+# 씬 한 개의 기본값 (극성: node2=모터2 미러 장착 기본 반전 → a_pol2/b_pol2=True)
+_SCENE_DEFAULTS = {
+    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 50, "a_pol1": False, "a_pol2": True,
+    "b_on": True, "b_freq": 0.4, "b_amp": 50, "b_pol1": False, "b_pol2": True, "phase": 0,
+}
+
+
+def _norm_scene(sc) -> dict:
+    """누락 키를 기본값으로 채움 (옛 쇼파일/극성 추가 전 파일 호환)."""
+    out = dict(_SCENE_DEFAULTS)
+    out.update(sc or {})
+    return out
+
+
 def _default_scenes():
     """기본 5씬: 동상 / 역상(180°) / A만 / B만 / 정지."""
+    def s(name, a_on, a_f, a_a, b_on, b_f, b_a, ph):
+        return _norm_scene({"name": name, "a_on": a_on, "a_freq": a_f, "a_amp": a_a,
+                            "b_on": b_on, "b_freq": b_f, "b_amp": b_a, "phase": ph})
     return [
-        {"name": "씬 1 동상",  "a_on": True,  "a_freq": 0.4, "a_amp": 60, "b_on": True,  "b_freq": 0.4, "b_amp": 60, "phase": 0},
-        {"name": "씬 2 역상",  "a_on": True,  "a_freq": 0.4, "a_amp": 60, "b_on": True,  "b_freq": 0.4, "b_amp": 60, "phase": 180},
-        {"name": "씬 3 A만",   "a_on": True,  "a_freq": 1.0, "a_amp": 40, "b_on": False, "b_freq": 1.0, "b_amp": 40, "phase": 0},
-        {"name": "씬 4 B만",   "a_on": False, "a_freq": 1.0, "a_amp": 40, "b_on": True,  "b_freq": 1.0, "b_amp": 40, "phase": 0},
-        {"name": "씬 5 정지",  "a_on": False, "a_freq": 0.4, "a_amp": 0,  "b_on": False, "b_freq": 0.4, "b_amp": 0,  "phase": 0},
+        s("씬 1 동상", True, 0.4, 60, True, 0.4, 60, 0),
+        s("씬 2 역상", True, 0.4, 60, True, 0.4, 60, 180),
+        s("씬 3 A만", True, 1.0, 40, False, 1.0, 40, 0),
+        s("씬 4 B만", False, 1.0, 40, True, 1.0, 40, 0),
+        s("씬 5 정지", False, 0.4, 0, False, 0.4, 0, 0),
     ]
 
 
@@ -478,7 +495,7 @@ class Controller(QtWidgets.QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._scene_host)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        scroll.setMinimumHeight(300)
+        scroll.setMinimumHeight(340)
         outer.addWidget(scroll)
 
         # 공통 하단: + 씬 추가 / 전환시간 / 저장·불러오기
@@ -536,6 +553,17 @@ class Controller(QtWidgets.QMainWindow):
         br = QtWidgets.QHBoxLayout(); br.addWidget(b_on); br.addWidget(b_freq); br.addWidget(b_amp)
         cv.addLayout(br)
 
+        # 극성 반전 (모터별) — node2=모터2 미러 기본 반전
+        a_p1 = QtWidgets.QCheckBox("A1"); a_p1.setToolTip("A 모터1 극성반전")
+        a_p2 = QtWidgets.QCheckBox("A2"); a_p2.setToolTip("A 모터2 극성반전")
+        b_p1 = QtWidgets.QCheckBox("B1"); b_p1.setToolTip("B 모터1 극성반전")
+        b_p2 = QtWidgets.QCheckBox("B2"); b_p2.setToolTip("B 모터2 극성반전")
+        polr = QtWidgets.QHBoxLayout(); polr.addWidget(QtWidgets.QLabel("반전"))
+        for cb in (a_p1, a_p2, b_p1, b_p2):
+            polr.addWidget(cb)
+        polr.addStretch(1)
+        cv.addLayout(polr)
+
         ph = QtWidgets.QSpinBox(); ph.setRange(0, 359); ph.setSuffix("°"); ph.setButtonSymbols(nob)
         pr = QtWidgets.QHBoxLayout(); pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph); pr.addStretch(1)
         cv.addLayout(pr)
@@ -548,11 +576,12 @@ class Controller(QtWidgets.QMainWindow):
         cv.addLayout(cr)
 
         self.sw.append({"name": name, "a_on": a_on, "a_freq": a_freq, "a_amp": a_amp,
-                        "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "phase": ph})
+                        "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "phase": ph,
+                        "a_pol1": a_p1, "a_pol2": a_p2, "b_pol1": b_p1, "b_pol2": b_p2})
         name.textChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         for wdg in (a_freq, a_amp, b_freq, b_amp, ph):
             wdg.valueChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
-        for wdg in (a_on, b_on):
+        for wdg in (a_on, b_on, a_p1, a_p2, b_p1, b_p2):
             wdg.toggled.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         return col
 
@@ -572,8 +601,7 @@ class Controller(QtWidgets.QMainWindow):
 
     def _add_scene(self):
         n = len(self.scenes)
-        self.scenes.append({"name": f"씬 {n + 1}", "a_on": True, "a_freq": 0.4, "a_amp": 50,
-                            "b_on": True, "b_freq": 0.4, "b_amp": 50, "phase": 0})
+        self.scenes.append(_norm_scene({"name": f"씬 {n + 1}"}))
         self._rebuild_scene_cols()
 
     def _del_scene(self, i: int):
@@ -591,6 +619,8 @@ class Controller(QtWidgets.QMainWindow):
             sw["name"].setText(sc["name"])
             sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
             sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
+            sw["a_pol1"].setChecked(sc["a_pol1"]); sw["a_pol2"].setChecked(sc["a_pol2"])
+            sw["b_pol1"].setChecked(sc["b_pol1"]); sw["b_pol2"].setChecked(sc["b_pol2"])
             sw["phase"].setValue(sc["phase"])
             self.scene_btns[i].setText(sc["name"])
         self._sw_block = False
@@ -604,16 +634,20 @@ class Controller(QtWidgets.QMainWindow):
             "name": sw["name"].text() or f"씬 {i + 1}",
             "a_on": sw["a_on"].isChecked(), "a_freq": round(sw["a_freq"].value(), 1), "a_amp": sw["a_amp"].value(),
             "b_on": sw["b_on"].isChecked(), "b_freq": round(sw["b_freq"].value(), 1), "b_amp": sw["b_amp"].value(),
+            "a_pol1": sw["a_pol1"].isChecked(), "a_pol2": sw["a_pol2"].isChecked(),
+            "b_pol1": sw["b_pol1"].isChecked(), "b_pol2": sw["b_pol2"].isChecked(),
             "phase": sw["phase"].value(),
         }
         self.scene_btns[i].setText(self.scenes[i]["name"])
 
     def _capture_scene(self, i: int):
-        """현재 두 패널의 슬라이더/동작상태를 씬 i 로 담기 (위상차는 유지)."""
+        """현재 두 패널의 슬라이더/동작/극성 상태를 씬 i 로 담기 (위상차는 유지)."""
         self.scenes[i] = {
             "name": self.scenes[i]["name"],
             "a_on": self.A.running, "a_freq": round(self.A.speed_slider.value() / 10.0, 1), "a_amp": self.A.angle_slider.value(),
             "b_on": self.B.running, "b_freq": round(self.B.speed_slider.value() / 10.0, 1), "b_amp": self.B.angle_slider.value(),
+            "a_pol1": self.A.pol_m1.isChecked(), "a_pol2": self.A.pol_m2.isChecked(),
+            "b_pol1": self.B.pol_m1.isChecked(), "b_pol2": self.B.pol_m2.isChecked(),
             "phase": self.scenes[i]["phase"],
         }
         self._refresh_scene_ui()
@@ -624,7 +658,7 @@ class Controller(QtWidgets.QMainWindow):
             with open(SHOWS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list) and data:
-                return data
+                return [_norm_scene(s) for s in data]
         except (OSError, ValueError):
             pass
         return None
@@ -648,6 +682,9 @@ class Controller(QtWidgets.QMainWindow):
         sc = self.scenes[idx]
         if self.link_cb.isChecked():
             self.link_cb.setChecked(False)   # 씬은 A/B 독립 → LINK 해제
+        # 극성 반전을 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
+        self.A.pol_m1.setChecked(sc["a_pol1"]); self.A.pol_m2.setChecked(sc["a_pol2"])
+        self.B.pol_m1.setChecked(sc["b_pol1"]); self.B.pol_m2.setChecked(sc["b_pol2"])
         n = max(1, int(self.crossfade_spin.value() * SEND_HZ))
         a_speed = max(1, round(sc["a_freq"] * 10))
         b_speed = max(1, round(sc["b_freq"] * 10))
@@ -799,7 +836,7 @@ def main():
     f.setPointSizeF(base * 1.5)
     app.setFont(f)
     win = Controller()
-    win.resize(1500, 880)
+    win.resize(1500, 940)
     win.show()
     sys.exit(app.exec())
 
