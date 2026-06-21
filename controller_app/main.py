@@ -58,6 +58,7 @@ TWO_PI = 2.0 * math.pi
 SCENE_COUNT = 5              # 공연 씬(버튼) 개수
 CROSSFADE_S = 1.5            # 씬 전환 크로스페이드 기본 시간 [s] (freq/amp 부드럽게 이어받기)
 SHOWS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shows", "show.json")
+OSC_SCENE = "/mirror/scene"   # 씬 트리거 OSC 주소 베이스 (/mirror/scene/<N> 또는 인자형)
 
 
 class SystemPanel(QtWidgets.QGroupBox):
@@ -432,7 +433,7 @@ def _phase_crossed(prev: float, cur: float, target: float) -> bool:
 
 class OscBridge(QtCore.QObject):
     """OSC 수신(별도 스레드) → 메인스레드로 씬 트리거. 시그널 큐잉으로 스레드 안전.
-    주소 규칙: /sw/scene/<N> (1-based) 또는 /sw/scene <int> → 그 씬 적용."""
+    주소 규칙: OSC_SCENE/<N> (1-based) 또는 OSC_SCENE <int> → 그 씬 적용."""
     trigger = QtCore.Signal(int)   # 0-based 씬 인덱스
     info = QtCore.Signal(str)      # 상태 텍스트
 
@@ -447,8 +448,8 @@ class OscBridge(QtCore.QObject):
             self.info.emit("python-osc 미설치")
             return False
         disp = Dispatcher()
-        disp.map("/sw/scene/*", self._on_addr)
-        disp.map("/sw/scene", self._on_arg)
+        disp.map(f"{OSC_SCENE}/*", self._on_addr)
+        disp.map(OSC_SCENE, self._on_arg)
         try:
             self._server = ThreadingOSCUDPServer(("0.0.0.0", port), disp)
         except OSError:
@@ -601,15 +602,15 @@ class Controller(QtWidgets.QMainWindow):
         self.osc_cb = QtWidgets.QCheckBox("OSC in")
         self.osc_cb.setToolTip(
             "Trigger a scene by sending OSC (no argument needed):\n"
-            "  /sw/scene/1   /sw/scene/2   /sw/scene/3 ...\n"
-            "Or address /sw/scene with one number arg (int or float):\n"
-            "  /sw/scene  2     /sw/scene  2.0")
+            f"  {OSC_SCENE}/1   {OSC_SCENE}/2   {OSC_SCENE}/3 ...\n"
+            f"Or address {OSC_SCENE} with one number arg (int or float):\n"
+            f"  {OSC_SCENE}  2     {OSC_SCENE}  2.0")
         self.osc_cb.toggled.connect(self._toggle_osc)
         bot.addWidget(self.osc_cb)
         bot.addWidget(QtWidgets.QLabel("port"))
         self.osc_port = QtWidgets.QLineEdit("9000"); self.osc_port.setMaximumWidth(70)
         bot.addWidget(self.osc_port)
-        self.osc_lbl = QtWidgets.QLabel("/sw/scene/N" if _HAS_OSC else "(no python-osc)")
+        self.osc_lbl = QtWidgets.QLabel(f"{OSC_SCENE}/N" if _HAS_OSC else "(no python-osc)")
         self.osc_lbl.setStyleSheet("color:#888;")
         bot.addWidget(self.osc_lbl)
         bot.addStretch(1)
@@ -636,7 +637,7 @@ class Controller(QtWidgets.QMainWindow):
         btn = QtWidgets.QPushButton()
         btn.setMinimumHeight(76)
         btn.setStyleSheet("font-weight:bold; padding:6px; text-align:center;")
-        btn.setToolTip(f"OSC: /sw/scene/{i + 1}")
+        btn.setToolTip(f"OSC: {OSC_SCENE}/{i + 1}")
         btn.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
         cv.addWidget(btn)
         self.scene_btns.append(btn)
@@ -813,7 +814,7 @@ class Controller(QtWidgets.QMainWindow):
             self.osc.stop()
             self.osc_port.setEnabled(True)
             if _HAS_OSC:
-                self.osc_lbl.setText("/sw/scene/N")
+                self.osc_lbl.setText(f"{OSC_SCENE}/N")
 
     def _osc_trigger(self, idx: int):
         """OSC 로 받은 씬 인덱스 적용 (메인스레드 슬롯)."""
