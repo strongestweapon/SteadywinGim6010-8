@@ -91,6 +91,9 @@ class SystemPanel(QtWidgets.QGroupBox):
         # 씬 전환(크로스페이드) 상태
         self._tr = None                       # 진행 중 ramp: dict(sp0,sp1,an0,an1,on,i,n) | None
         self._deferred = False                # 스태거드 스타트 대기(위상차) — trigger_start 까지 보류
+        # 씬 엔벨로프(시간 자동화) 상태: 크로스페이드로 start 도달 후 start→end 로 진행
+        self._env = None                      # 진행 중 엔벨로프 dict | None
+        self._pending_env = None              # _tr 끝나면 시작할 엔벨로프 | None
         self.value = 0.0                  # 현재 명령값 [출력°] (그래프용)
         self.buf = np.zeros(PLOT_N)       # 파형 롤링 버퍼
         self._build()
@@ -214,12 +217,14 @@ class SystemPanel(QtWidgets.QGroupBox):
 
     # ---------------------------------------------------------------- 씬 전환
     def begin_transition(self, speed_units: int, angle_pct: int, on: bool,
-                         n_steps: int, defer_start: bool = False):
-        """씬 적용: 슬라이더(속도/강도)를 목표로 n_steps 동안 램프(=부드러운 이어받기).
+                         n_steps: int, defer_start: bool = False, env: dict | None = None):
+        """씬 적용: 슬라이더(속도/강도)를 start 값으로 n_steps 동안 램프(=부드러운 이어받기).
         on=False 면 강도 0 으로 페이드 후 정지. defer_start=True 면 START 를 보류
-        (위상차 스태거드 스타트용 — Controller 가 적절한 시점에 trigger_start)."""
+        (위상차 스태거드 스타트용 — Controller 가 적절한 시점에 trigger_start).
+        env 가 있으면 크로스페이드로 start 도달 후 그 엔벨로프(start→end, 시간/곡선)로 진행."""
         if not on:
             angle_pct = 0                       # 끄는 씬: 진폭 0 으로 페이드
+            env = None                          # 끄는 씬엔 엔벨로프 없음
         fade_in = on and (not self.running)     # 정지→동작: 0 에서 페이드인
         if fade_in:
             # amp 0 에서 출발 → freq 는 즉시 목표로(무동작이라 점프 무방), 진폭만 페이드.
@@ -234,6 +239,9 @@ class SystemPanel(QtWidgets.QGroupBox):
             "an0": an0, "an1": int(angle_pct),
             "on": on, "i": 0, "n": max(1, n_steps),
         }
+        # start→end 가 실제로 변하는 엔벨로프만 보관 (정적 씬이면 None → 기존 동작 그대로)
+        self._pending_env = env if (env and (env["f0"] != env["f1"] or env["a0"] != env["a1"])) else None
+        self._env = None
         self._deferred = bool(defer_start and fade_in)
         if fade_in and not self._deferred:
             self.start()
@@ -245,21 +253,40 @@ class SystemPanel(QtWidgets.QGroupBox):
             self.start()
 
     def step_transition(self):
-        """매 틱 호출. 보류 중이면 대기, 아니면 슬라이더를 목표로 한 스텝 이동."""
-        if self._tr is None or self._deferred:
+        """매 틱 호출. 1) 크로스페이드로 start 도달 → 2) 엔벨로프로 start→end 진행."""
+        if self._deferred:
             return
-        tr = self._tr
-        tr["i"] += 1
-        f = tr["i"] / tr["n"]
-        if f >= 1.0:
-            self.speed_slider.setValue(tr["sp1"])
-            self.angle_slider.setValue(tr["an1"])
-            if not tr["on"] and self.running:
-                self.stop()
-            self._tr = None
+        # 1) 크로스페이드 (현재값 → start)
+        if self._tr is not None:
+            tr = self._tr
+            tr["i"] += 1
+            f = tr["i"] / tr["n"]
+            if f >= 1.0:
+                self.speed_slider.setValue(tr["sp1"])
+                self.angle_slider.setValue(tr["an1"])
+                if not tr["on"] and self.running:
+                    self.stop()
+                self._tr = None
+                # 크로스페이드 끝 → 대기 중 엔벨로프 시작
+                if self._pending_env is not None:
+                    self._env = dict(self._pending_env, i=0)
+                    self._pending_env = None
+                return
+            self.speed_slider.setValue(int(round(tr["sp0"] + (tr["sp1"] - tr["sp0"]) * f)))
+            self.angle_slider.setValue(int(round(tr["an0"] + (tr["an1"] - tr["an0"]) * f)))
             return
-        self.speed_slider.setValue(int(round(tr["sp0"] + (tr["sp1"] - tr["sp0"]) * f)))
-        self.angle_slider.setValue(int(round(tr["an0"] + (tr["an1"] - tr["an0"]) * f)))
+        # 2) 엔벨로프 (start → end, A/B·freq/amp 각자 곡선) — 끝값 유지
+        if self._env is not None:
+            ev = self._env
+            ev["i"] += 1
+            p = ev["i"] / ev["n"]
+            if p >= 1.0:
+                self.speed_slider.setValue(ev["f1"])
+                self.angle_slider.setValue(ev["a1"])
+                self._env = None
+                return
+            self.speed_slider.setValue(int(round(_ease(ev["f0"], ev["f1"], ev["fc"], p))))
+            self.angle_slider.setValue(int(round(_ease(ev["a0"], ev["a1"], ev["ac"], p))))
 
     def _labels(self):
         freq = self.speed_slider.value() / 10.0
@@ -386,19 +413,43 @@ def _rand100() -> int:
     return random.randint(0, 99)
 
 
-# 씬 한 개의 기본값 (진폭=출력° / twist=False=두 모터 같이·평행 기본)
+# 씬 한 개의 기본값.
+# 씬 = "시간 가진 엔벨로프": 누르면 duration[s] 동안 freq/amp 가 start(0)→end(1) 로 변함.
+#   - 곡선(curve)은 A/B · freq/amp 각각 따로: "lin"(선형) | "exp"(지수=처음 느리고 끝에서 빨라짐)
+#   - 끝에 닿으면 end 값으로 유지(hold). Δφ·twist 는 씬 동안 고정, 변하는 건 freq/amp 만.
+# 진폭=출력° / twist=False=두 모터 같이·평행 기본.
 _SCENE_DEFAULTS = {
-    "name": "씬", "a_on": True, "a_freq": 0.4, "a_amp": 30, "a_twist": False,
-    "b_on": True, "b_freq": 0.4, "b_amp": 30, "b_twist": False, "phase": 0,
+    "name": "씬", "duration": 0.0,
+    "a_on": True, "a_freq0": 0.4, "a_freq1": 0.4, "a_fcurve": "lin",
+    "a_amp0": 30, "a_amp1": 30, "a_acurve": "lin", "a_twist": False,
+    "b_on": True, "b_freq0": 0.4, "b_freq1": 0.4, "b_fcurve": "lin",
+    "b_amp0": 30, "b_amp1": 30, "b_acurve": "lin", "b_twist": False,
+    "phase": 0,
 }
 
 
 def _norm_scene(sc) -> dict:
-    """누락 키를 기본값으로 채움 + 진폭을 주파수 한계로 클램프 (옛 쇼파일/극성 추가 전 파일 호환)."""
+    """누락 키를 기본값으로 채움 + 진폭을 주파수 한계로 클램프.
+    옛 쇼파일(정적 a_freq/a_amp 단일값)도 start=end 로 자동 변환."""
+    sc = dict(sc or {})
+    # 구버전 단일값 → start/end 양쪽으로 펼침
+    for side in ("a", "b"):
+        if f"{side}_freq" in sc:
+            sc.setdefault(f"{side}_freq0", sc[f"{side}_freq"])
+            sc.setdefault(f"{side}_freq1", sc[f"{side}_freq"])
+        if f"{side}_amp" in sc:
+            sc.setdefault(f"{side}_amp0", sc[f"{side}_amp"])
+            sc.setdefault(f"{side}_amp1", sc[f"{side}_amp"])
     out = dict(_SCENE_DEFAULTS)
-    out.update(sc or {})
-    out["a_amp"] = min(int(out["a_amp"]), int(amp_deg_max_safe(out["a_freq"])))
-    out["b_amp"] = min(int(out["b_amp"]), int(amp_deg_max_safe(out["b_freq"])))
+    out.update(sc)
+    # 진폭 start/end 각각 자기 주파수 한계로 클램프
+    out["a_amp0"] = min(int(out["a_amp0"]), int(amp_deg_max_safe(out["a_freq0"])))
+    out["a_amp1"] = min(int(out["a_amp1"]), int(amp_deg_max_safe(out["a_freq1"])))
+    out["b_amp0"] = min(int(out["b_amp0"]), int(amp_deg_max_safe(out["b_freq0"])))
+    out["b_amp1"] = min(int(out["b_amp1"]), int(amp_deg_max_safe(out["b_freq1"])))
+    for k in ("a_fcurve", "a_acurve", "b_fcurve", "b_acurve"):
+        if out[k] not in ("lin", "exp"):
+            out[k] = "lin"
     return out
 
 
@@ -407,8 +458,17 @@ def amp_deg_max_safe(freq) -> float:
     return proto.amp_deg_max(float(freq), 1.0)
 
 
+def _ease(v0: float, v1: float, curve: str, p: float) -> float:
+    """v0→v1 보간. p∈[0,1]. 'lin'=선형, 'exp'=지수(처음 느리고 끝에서 가속).
+    exp 는 어떤 끝값(0 포함)에도 안전한 단조 ease 곡선."""
+    if curve == "exp":
+        k = 3.0
+        p = (math.exp(k * p) - 1.0) / (math.exp(k) - 1.0)
+    return v0 + (v1 - v0) * p
+
+
 def _default_scenes():
-    """기본 5씬: 동상 / 역상(180°) / A만 / B만 / 정지."""
+    """기본 5씬: 동상 / 역상(180°) / A만 / B만 / 정지. (start=end=정적, duration 0)."""
     def s(name, a_on, a_f, a_a, b_on, b_f, b_a, ph):
         return _norm_scene({"name": name, "a_on": a_on, "a_freq": a_f, "a_amp": a_a,
                             "b_on": b_on, "b_freq": b_f, "b_amp": b_a, "phase": ph})
@@ -572,11 +632,11 @@ class Controller(QtWidgets.QMainWindow):
     # ---------------------------------------------------------------- 공연(씬) UI
     def _build_show(self):
         """씬을 각각 [적용버튼 + 칸 안에 A/B 켜기·freq·amp·위상차]로 나란히. + 씬 추가/삭제·가로스크롤."""
-        box = QtWidgets.QGroupBox("Show (Scenes) — press a button to crossfade to that scene")
+        box = QtWidgets.QGroupBox("Show (Scenes) — press a button: ramps freq/amp start→end over Duration, then holds")
         outer = QtWidgets.QVBoxLayout(box)
         self._sw_block = False
         self.scene_btns = []
-        self.sw = []   # 씬별 위젯 모음 [{name,a_on,a_freq,a_amp,b_on,b_freq,b_amp,phase}]
+        self.sw = []   # 씬별 위젯 모음 [{name,a_on,a_f0,a_f1,a_fc,a_a0,a_a1,a_ac,a_twist,...,phase,dur}]
 
         # 씬 칸들 — 가로 스크롤(씬 늘어나면 옆으로)
         self._scene_host = QtWidgets.QWidget()
@@ -593,10 +653,11 @@ class Controller(QtWidgets.QMainWindow):
         bot = QtWidgets.QHBoxLayout()
         addb = QtWidgets.QPushButton("+ Add scene"); addb.clicked.connect(self._add_scene)
         bot.addWidget(addb)
-        bot.addWidget(QtWidgets.QLabel("Crossfade"))
+        bot.addWidget(QtWidgets.QLabel("Lead-in"))
         self.crossfade_spin = QtWidgets.QDoubleSpinBox()
         self.crossfade_spin.setRange(0.0, 5.0); self.crossfade_spin.setSingleStep(0.1)
         self.crossfade_spin.setValue(CROSSFADE_S); self.crossfade_spin.setSuffix(" s")
+        self.crossfade_spin.setToolTip("현재 상태 → 씬 start 값까지 부드럽게 도달하는 시간. 그 뒤 Duration 동안 start→end 진행.")
         bot.addWidget(self.crossfade_spin)
         bot.addSpacing(20)
         self.osc_cb = QtWidgets.QCheckBox("OSC in")
@@ -620,18 +681,31 @@ class Controller(QtWidgets.QMainWindow):
         outer.addLayout(bot)
 
         note = QtWidgets.QLabel(
-            "Phase = staggered start (B starts when A reaches the offset). "
-            "To change phase while both already run, restart B in that scene (Stop, then apply).")
+            "Each scene is a timed envelope: f/A ramp from start→end over Duration (Lin/Exp per field), then hold. "
+            "Dur 0 = jump to end. Lead-in smooths the approach to the start values. "
+            "Phase = staggered start (B starts when A reaches the offset); "
+            "to change phase while both already run, restart B in that scene (Stop, then apply).")
         note.setStyleSheet("color:#888;"); note.setWordWrap(True)
         outer.addWidget(note)
 
         self._rebuild_scene_cols()
         return box
 
+    @staticmethod
+    def _curve_combo() -> QtWidgets.QComboBox:
+        """보간 곡선 선택 (Lin/Exp). currentData()='lin'|'exp'."""
+        c = QtWidgets.QComboBox()
+        c.addItem("Lin", "lin")
+        c.addItem("Exp", "exp")
+        c.setMaximumWidth(58)
+        c.setToolTip("Lin = 일정 속도로 변화\nExp = 처음 느리고 끝에서 가속")
+        return c
+
     def _make_scene_col(self, i: int) -> QtWidgets.QGroupBox:
-        """씬 한 칸 위젯 생성. self.sw / self.scene_btns 에 순서대로 append."""
+        """씬 한 칸 위젯 생성. self.sw / self.scene_btns 에 순서대로 append.
+        씬 = 시간 엔벨로프: [start]→[end] freq/amp + 각자 곡선 + duration."""
         col = QtWidgets.QGroupBox()
-        col.setMinimumWidth(280)
+        col.setMinimumWidth(360)
         cv = QtWidgets.QVBoxLayout(col)
 
         btn = QtWidgets.QPushButton()
@@ -648,28 +722,51 @@ class Controller(QtWidgets.QMainWindow):
 
         nob = QtWidgets.QAbstractSpinBox.NoButtons   # 위아래 화살표 없이 타이핑만 (공간 절약)
 
-        # A 줄 = [A 켜기] freq amp [반대=트위스트]
-        a_on = QtWidgets.QCheckBox("A")
-        a_freq = QtWidgets.QDoubleSpinBox(); a_freq.setRange(0.1, proto.FREQ_MAX); a_freq.setSingleStep(0.1); a_freq.setSuffix(" Hz"); a_freq.setButtonSymbols(nob)
-        a_amp = QtWidgets.QSpinBox(); a_amp.setRange(0, 360); a_amp.setSuffix("°"); a_amp.setButtonSymbols(nob); a_amp.setKeyboardTracking(False)
-        a_tw = QtWidgets.QCheckBox("Twist"); a_tw.setToolTip("A: two motors opposite direction (twist). Unchecked = same direction (parallel)")
-        ar = QtWidgets.QHBoxLayout()
-        for x in (a_on, a_freq, a_amp, a_tw):
-            ar.addWidget(x)
-        cv.addLayout(ar)
+        def freq_spin():
+            s = QtWidgets.QDoubleSpinBox(); s.setRange(0.1, proto.FREQ_MAX)
+            s.setSingleStep(0.1); s.setButtonSymbols(nob); s.setMaximumWidth(64)
+            s.setKeyboardTracking(False)
+            return s
 
-        # B 줄 = [B 켜기] freq amp [반대=트위스트]
-        b_on = QtWidgets.QCheckBox("B")
-        b_freq = QtWidgets.QDoubleSpinBox(); b_freq.setRange(0.1, proto.FREQ_MAX); b_freq.setSingleStep(0.1); b_freq.setSuffix(" Hz"); b_freq.setButtonSymbols(nob)
-        b_amp = QtWidgets.QSpinBox(); b_amp.setRange(0, 360); b_amp.setSuffix("°"); b_amp.setButtonSymbols(nob); b_amp.setKeyboardTracking(False)
-        b_tw = QtWidgets.QCheckBox("Twist"); b_tw.setToolTip("B: two motors opposite direction (twist). Unchecked = same direction (parallel)")
-        br = QtWidgets.QHBoxLayout()
-        for x in (b_on, b_freq, b_amp, b_tw):
-            br.addWidget(x)
-        cv.addLayout(br)
+        def amp_spin():
+            s = QtWidgets.QSpinBox(); s.setRange(0, 360); s.setSuffix("°")
+            s.setButtonSymbols(nob); s.setKeyboardTracking(False); s.setMaximumWidth(64)
+            return s
+
+        def env_row(tag, tip):
+            """[☑tag] freq: [f0]→[f1] [curve] amp: [a0]→[a1] [curve] [Twist] 한 줄 묶음.
+            2줄로 나눔(freq 줄 / amp 줄) — 칸 너비 절약."""
+            on = QtWidgets.QCheckBox(tag)
+            tw = QtWidgets.QCheckBox("Twist"); tw.setToolTip(tip)
+            f0, f1, fc = freq_spin(), freq_spin(), self._curve_combo()
+            a0, a1, ac = amp_spin(), amp_spin(), self._curve_combo()
+            # freq 줄
+            fr = QtWidgets.QHBoxLayout()
+            fr.addWidget(on); fr.addWidget(QtWidgets.QLabel("f")); fr.addWidget(f0)
+            fr.addWidget(QtWidgets.QLabel("→")); fr.addWidget(f1)
+            fr.addWidget(QtWidgets.QLabel("Hz")); fr.addWidget(fc); fr.addWidget(tw)
+            cv.addLayout(fr)
+            # amp 줄
+            am = QtWidgets.QHBoxLayout()
+            am.addSpacing(4); am.addWidget(QtWidgets.QLabel("A")); am.addWidget(a0)
+            am.addWidget(QtWidgets.QLabel("→")); am.addWidget(a1)
+            am.addWidget(ac); am.addStretch(1)
+            cv.addLayout(am)
+            return on, f0, f1, fc, a0, a1, ac, tw
+
+        (a_on, a_f0, a_f1, a_fc, a_a0, a_a1, a_ac, a_tw) = env_row(
+            "A", "A: two motors opposite (twist). Unchecked = parallel")
+        (b_on, b_f0, b_f1, b_fc, b_a0, b_a1, b_ac, b_tw) = env_row(
+            "B", "B: two motors opposite (twist). Unchecked = parallel")
 
         ph = QtWidgets.QSpinBox(); ph.setRange(0, 359); ph.setSuffix("°"); ph.setButtonSymbols(nob)
-        pr = QtWidgets.QHBoxLayout(); pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph); pr.addStretch(1)
+        dur = QtWidgets.QDoubleSpinBox(); dur.setRange(0.0, 600.0); dur.setSingleStep(0.5)
+        dur.setSuffix(" s"); dur.setButtonSymbols(nob); dur.setKeyboardTracking(False)
+        dur.setToolTip("Envelope time: start→end 에 걸리는 시간. 0=즉시.")
+        pr = QtWidgets.QHBoxLayout()
+        pr.addWidget(QtWidgets.QLabel("Δφ")); pr.addWidget(ph)
+        pr.addSpacing(10)
+        pr.addWidget(QtWidgets.QLabel("Dur")); pr.addWidget(dur); pr.addStretch(1)
         cv.addLayout(pr)
 
         cap = QtWidgets.QPushButton("Capture current")
@@ -679,13 +776,21 @@ class Controller(QtWidgets.QMainWindow):
         cr = QtWidgets.QHBoxLayout(); cr.addWidget(cap); cr.addWidget(delb)
         cv.addLayout(cr)
 
-        self.sw.append({"name": name, "a_on": a_on, "a_freq": a_freq, "a_amp": a_amp, "a_twist": a_tw,
-                        "b_on": b_on, "b_freq": b_freq, "b_amp": b_amp, "b_twist": b_tw, "phase": ph})
+        self.sw.append({
+            "name": name,
+            "a_on": a_on, "a_f0": a_f0, "a_f1": a_f1, "a_fc": a_fc,
+            "a_a0": a_a0, "a_a1": a_a1, "a_ac": a_ac, "a_twist": a_tw,
+            "b_on": b_on, "b_f0": b_f0, "b_f1": b_f1, "b_fc": b_fc,
+            "b_a0": b_a0, "b_a1": b_a1, "b_ac": b_ac, "b_twist": b_tw,
+            "phase": ph, "dur": dur,
+        })
         name.textChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
-        for wdg in (a_freq, a_amp, b_freq, b_amp, ph):
+        for wdg in (a_f0, a_f1, a_a0, a_a1, b_f0, b_f1, b_a0, b_a1, ph, dur):
             wdg.valueChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         for wdg in (a_on, b_on, a_tw, b_tw):
             wdg.toggled.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
+        for wdg in (a_fc, a_ac, b_fc, b_ac):
+            wdg.currentIndexChanged.connect(lambda _=None, idx=i: self._scene_widgets_changed(idx))
         return col
 
     def _rebuild_scene_cols(self):
@@ -716,12 +821,22 @@ class Controller(QtWidgets.QMainWindow):
     # ---- 씬 데이터 ↔ 씬칸 위젯 ----
     @staticmethod
     def _scene_btn_text(sc) -> str:
-        """버튼 라벨 = 이름 + A/B 요약 (담기/편집 시 눈에 띄게 바뀜)."""
-        def part(on, f, amp, tw):
-            return (f"{f:.1f}Hz·{amp}°" + ("↔" if tw else "")) if on else "off"
-        a = part(sc["a_on"], sc["a_freq"], sc["a_amp"], sc["a_twist"])
-        b = part(sc["b_on"], sc["b_freq"], sc["b_amp"], sc["b_twist"])
-        return f"{sc['name']}\nA {a}   B {b}   Δφ{sc['phase']}°"
+        """버튼 라벨 = 이름 + A/B 요약. start→end 가 다르면 화살표로 표시."""
+        def rng(v0, v1, unit):
+            return f"{v0:g}{unit}" if v0 == v1 else f"{v0:g}→{v1:g}{unit}"
+        def part(on, f0, f1, a0, a1, tw):
+            if not on:
+                return "off"
+            return rng(f0, f1, "Hz") + "·" + rng(a0, a1, "°") + ("↔" if tw else "")
+        a = part(sc["a_on"], sc["a_freq0"], sc["a_freq1"], sc["a_amp0"], sc["a_amp1"], sc["a_twist"])
+        b = part(sc["b_on"], sc["b_freq0"], sc["b_freq1"], sc["b_amp0"], sc["b_amp1"], sc["b_twist"])
+        d = f"  {sc['duration']:g}s" if sc["duration"] > 0 else ""
+        return f"{sc['name']}\nA {a}   B {b}   Δφ{sc['phase']}°{d}"
+
+    @staticmethod
+    def _set_curve(combo, val):
+        idx = combo.findData(val)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _refresh_scene_ui(self):
         """self.scenes → 각 씬칸 위젯 + 버튼 라벨."""
@@ -729,23 +844,26 @@ class Controller(QtWidgets.QMainWindow):
         for i, sc in enumerate(self.scenes):
             sw = self.sw[i]
             sw["name"].setText(sc["name"])
-            sw["a_on"].setChecked(sc["a_on"]); sw["a_freq"].setValue(sc["a_freq"]); sw["a_amp"].setValue(sc["a_amp"])
-            sw["b_on"].setChecked(sc["b_on"]); sw["b_freq"].setValue(sc["b_freq"]); sw["b_amp"].setValue(sc["b_amp"])
-            sw["a_twist"].setChecked(sc["a_twist"]); sw["b_twist"].setChecked(sc["b_twist"])
-            sw["phase"].setValue(sc["phase"])
+            for side in ("a", "b"):
+                sw[f"{side}_on"].setChecked(sc[f"{side}_on"])
+                sw[f"{side}_f0"].setValue(sc[f"{side}_freq0"]); sw[f"{side}_f1"].setValue(sc[f"{side}_freq1"])
+                sw[f"{side}_a0"].setValue(sc[f"{side}_amp0"]); sw[f"{side}_a1"].setValue(sc[f"{side}_amp1"])
+                sw[f"{side}_twist"].setChecked(sc[f"{side}_twist"])
+                self._set_curve(sw[f"{side}_fc"], sc[f"{side}_fcurve"])
+                self._set_curve(sw[f"{side}_ac"], sc[f"{side}_acurve"])
+            sw["phase"].setValue(sc["phase"]); sw["dur"].setValue(sc["duration"])
             self.scene_btns[i].setText(self._scene_btn_text(sc))
         self._sw_block = False
 
     def _clamp_scene_amp(self, i: int):
-        """입력 끝난 진폭을 그 주파수의 최대각으로 줄임 (입력 중엔 막지 않음 → 타이핑 자유)."""
+        """입력 끝난 진폭 start/end 를 각자 주파수의 최대각으로 줄임 (입력 중엔 안 막음)."""
         self._sw_block = True
         sw = self.sw[i]
-        am = int(amp_deg_max_safe(sw["a_freq"].value()))
-        bm = int(amp_deg_max_safe(sw["b_freq"].value()))
-        if sw["a_amp"].value() > am:
-            sw["a_amp"].setValue(am)
-        if sw["b_amp"].value() > bm:
-            sw["b_amp"].setValue(bm)
+        for side in ("a", "b"):
+            for fk, ak in ((f"{side}_f0", f"{side}_a0"), (f"{side}_f1", f"{side}_a1")):
+                mx = int(amp_deg_max_safe(sw[fk].value()))
+                if sw[ak].value() > mx:
+                    sw[ak].setValue(mx)
         self._sw_block = False
 
     def _scene_widgets_changed(self, i: int):
@@ -754,24 +872,35 @@ class Controller(QtWidgets.QMainWindow):
             return
         self._clamp_scene_amp(i)   # 주파수 한계로 줄임(초과 입력/주파수 상승 시)
         sw = self.sw[i]
-        self.scenes[i] = {
-            "name": sw["name"].text() or f"Scene {i + 1}",
-            "a_on": sw["a_on"].isChecked(), "a_freq": round(sw["a_freq"].value(), 1), "a_amp": sw["a_amp"].value(),
-            "b_on": sw["b_on"].isChecked(), "b_freq": round(sw["b_freq"].value(), 1), "b_amp": sw["b_amp"].value(),
-            "a_twist": sw["a_twist"].isChecked(), "b_twist": sw["b_twist"].isChecked(),
-            "phase": sw["phase"].value(),
-        }
-        self.scene_btns[i].setText(self._scene_btn_text(self.scenes[i]))
+        sc = {"name": sw["name"].text() or f"Scene {i + 1}",
+              "duration": round(sw["dur"].value(), 1), "phase": sw["phase"].value()}
+        for side in ("a", "b"):
+            sc[f"{side}_on"] = sw[f"{side}_on"].isChecked()
+            sc[f"{side}_freq0"] = round(sw[f"{side}_f0"].value(), 1)
+            sc[f"{side}_freq1"] = round(sw[f"{side}_f1"].value(), 1)
+            sc[f"{side}_amp0"] = sw[f"{side}_a0"].value()
+            sc[f"{side}_amp1"] = sw[f"{side}_a1"].value()
+            sc[f"{side}_fcurve"] = sw[f"{side}_fc"].currentData()
+            sc[f"{side}_acurve"] = sw[f"{side}_ac"].currentData()
+            sc[f"{side}_twist"] = sw[f"{side}_twist"].isChecked()
+        self.scenes[i] = sc
+        self.scene_btns[i].setText(self._scene_btn_text(sc))
 
     def _capture_scene(self, i: int):
-        """현재 두 패널의 슬라이더/동작/극성 상태를 씬 i 로 담기 (위상차는 유지)."""
-        self.scenes[i] = {
-            "name": self.scenes[i]["name"],
-            "a_on": self.A.running, "a_freq": round(self.A.speed_slider.value() / 10.0, 1), "a_amp": self.A.angle_slider.value(),
-            "b_on": self.B.running, "b_freq": round(self.B.speed_slider.value() / 10.0, 1), "b_amp": self.B.angle_slider.value(),
-            "a_twist": self.A.twist.isChecked(), "b_twist": self.B.twist.isChecked(),
-            "phase": self.scenes[i]["phase"],
-        }
+        """현재 두 패널 상태를 씬 i 의 start·end 양쪽에 담기(정적 스냅샷). 곡선/duration/위상차는 유지."""
+        old = self.scenes[i]
+        def snap(panel):
+            return (panel.running, round(panel.speed_slider.value() / 10.0, 1),
+                    panel.angle_slider.value(), panel.twist.isChecked())
+        a_on, a_f, a_a, a_tw = snap(self.A)
+        b_on, b_f, b_a, b_tw = snap(self.B)
+        self.scenes[i] = _norm_scene({
+            "name": old["name"], "duration": old["duration"], "phase": old["phase"],
+            "a_on": a_on, "a_freq0": a_f, "a_freq1": a_f, "a_amp0": a_a, "a_amp1": a_a,
+            "a_fcurve": old["a_fcurve"], "a_acurve": old["a_acurve"], "a_twist": a_tw,
+            "b_on": b_on, "b_freq0": b_f, "b_freq1": b_f, "b_amp0": b_a, "b_amp1": b_a,
+            "b_fcurve": old["b_fcurve"], "b_acurve": old["b_acurve"], "b_twist": b_tw,
+        })
         self._refresh_scene_ui()
 
     # ---- 쇼파일 저장/불러오기 ----
@@ -836,15 +965,21 @@ class Controller(QtWidgets.QMainWindow):
         # 극성(반대방향) 패널에 적용 (운전 중 바뀌면 ESP32 가 fade-restart 로 매끈 반영)
         self.A.twist.setChecked(sc["a_twist"]); self.B.twist.setChecked(sc["b_twist"])
         n = max(1, int(self.crossfade_spin.value() * SEND_HZ))
-        a_speed = max(1, round(sc["a_freq"] * 10))
-        b_speed = max(1, round(sc["b_freq"] * 10))
+        dur = max(1, int(sc["duration"] * SEND_HZ))   # 엔벨로프 진행 스텝 수
+        a_speed = max(1, round(sc["a_freq0"] * 10))   # 크로스페이드 도달 = start
+        b_speed = max(1, round(sc["b_freq0"] * 10))
+        # 엔벨로프(슬라이더 단위/°): start→end, freq/amp 각자 곡선
+        a_env = {"f0": a_speed, "f1": max(1, round(sc["a_freq1"] * 10)), "fc": sc["a_fcurve"],
+                 "a0": int(sc["a_amp0"]), "a1": int(sc["a_amp1"]), "ac": sc["a_acurve"], "n": dur}
+        b_env = {"f0": b_speed, "f1": max(1, round(sc["b_freq1"] * 10)), "fc": sc["b_fcurve"],
+                 "a0": int(sc["b_amp0"]), "a1": int(sc["b_amp1"]), "ac": sc["b_acurve"], "n": dur}
         self._pending_start = None
         both_on = sc["a_on"] and sc["b_on"]
         # A = 위상 기준. 바로 적용.
-        self.A.begin_transition(a_speed, sc["a_amp"], sc["a_on"], n, defer_start=False)
+        self.A.begin_transition(a_speed, sc["a_amp0"], sc["a_on"], n, defer_start=False, env=a_env)
         # B = 둘 다 켜는 씬에서 B가 새로 켜질 때만 위상차만큼 스태거.
         defer_b = both_on and (not self.B.running)
-        self.B.begin_transition(b_speed, sc["b_amp"], sc["b_on"], n, defer_start=defer_b)
+        self.B.begin_transition(b_speed, sc["b_amp0"], sc["b_on"], n, defer_start=defer_b, env=b_env)
         if defer_b:
             target = math.radians(sc["phase"]) % TWO_PI
             self._pending_start = {"panel": self.B, "ref": self.A, "target": target, "prev": self.A.phase}
