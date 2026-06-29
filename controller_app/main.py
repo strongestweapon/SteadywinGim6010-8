@@ -598,8 +598,8 @@ class Controller(QtWidgets.QMainWindow):
 
         # 좌우 패널 — 각 패널 위 중앙에 "제어 대상" 라디오, 선택된 패널은 초록 강조
         panels = QtWidgets.QHBoxLayout()
-        self.A = SystemPanel("A", "192.168.0.44")   # 무대 오른쪽 (기존 ESP32)
-        self.B = SystemPanel("B", "192.168.0.46")   # 무대 왼쪽 (새 ESP32)
+        self.A = SystemPanel("A", "192.168.0.56")   # Mirror A (MAC 14-C1-9F-38-EE-24, COM7)
+        self.B = SystemPanel("B", "192.168.0.57")   # Mirror B (MAC 14-C1-9F-38-EE-2C, COM5)
         self.tgt_a = QtWidgets.QRadioButton("● Control A")
         self.tgt_b = QtWidgets.QRadioButton("● Control B")
         self.tgt_a.setChecked(True)
@@ -632,7 +632,7 @@ class Controller(QtWidgets.QMainWindow):
     # ---------------------------------------------------------------- 공연(씬) UI
     def _build_show(self):
         """씬을 각각 [적용버튼 + 칸 안에 A/B 켜기·freq·amp·위상차]로 나란히. + 씬 추가/삭제·가로스크롤."""
-        box = QtWidgets.QGroupBox("Show (Scenes) — press a button: ramps freq/amp start→end over Duration, then holds")
+        box = QtWidgets.QGroupBox("Show (Scenes) — click a button or press number keys 1-9,0 (= scenes 1-10): ramps freq/amp start→end over Duration, then holds")
         outer = QtWidgets.QVBoxLayout(box)
         self._sw_block = False
         self.scene_btns = []
@@ -711,7 +711,8 @@ class Controller(QtWidgets.QMainWindow):
         btn = QtWidgets.QPushButton()
         btn.setMinimumHeight(76)
         btn.setStyleSheet("font-weight:bold; padding:6px; text-align:center;")
-        btn.setToolTip(f"OSC: {OSC_SCENE}/{i + 1}")
+        _k = self._scene_key_label(i)
+        btn.setToolTip((f"Key: {_k}\n" if _k else "") + f"OSC: {OSC_SCENE}/{i + 1}")
         btn.clicked.connect(lambda _=False, idx=i: self._apply_scene(idx))
         cv.addWidget(btn)
         self.scene_btns.append(btn)
@@ -852,7 +853,8 @@ class Controller(QtWidgets.QMainWindow):
                 self._set_curve(sw[f"{side}_fc"], sc[f"{side}_fcurve"])
                 self._set_curve(sw[f"{side}_ac"], sc[f"{side}_acurve"])
             sw["phase"].setValue(sc["phase"]); sw["dur"].setValue(sc["duration"])
-            self.scene_btns[i].setText(self._scene_btn_text(sc))
+            key = self._scene_key_label(i)
+            self.scene_btns[i].setText((f"[{key}]  " if key else "") + self._scene_btn_text(sc))
         self._sw_block = False
 
     def _clamp_scene_amp(self, i: int):
@@ -953,6 +955,32 @@ class Controller(QtWidgets.QMainWindow):
 
     def _osc_info(self, text: str):
         self.osc_lbl.setText(text)
+
+    # ---- 키보드 숫자키로 씬 트리거 (공연용) ----
+    @staticmethod
+    def _scene_key_label(i: int) -> str:
+        """씬 i 를 트리거하는 숫자키 라벨. 0~8→'1'~'9', 9→'0', 그 이상은 단축키 없음."""
+        if 0 <= i <= 8:
+            return str(i + 1)
+        if i == 9:
+            return "0"
+        return ""
+
+    def keyPressEvent(self, ev):
+        """숫자키 1~9,0 → 씬 1~10 트리거. 이름/주파수/진폭 칸을 편집 중이면 키가 그
+        위젯으로 가서 여기 안 오므로 타이핑과 충돌하지 않는다 (필드 밖 포커스일 때만 동작)."""
+        key = ev.key()
+        idx = None
+        if QtCore.Qt.Key_1 <= key <= QtCore.Qt.Key_9:
+            idx = key - QtCore.Qt.Key_1          # '1'→0 ... '9'→8
+        elif key == QtCore.Qt.Key_0:
+            idx = 9                               # '0' → 10번째 씬
+        if idx is not None and 0 <= idx < len(self.scenes):
+            self._apply_scene(idx)
+            self.osc_lbl.setText(f"⌨ scene {idx + 1}")   # ⌨
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
 
     def closeEvent(self, ev):
         self.osc.stop()
